@@ -25,6 +25,12 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// Result array index/slice: `expr[-1]`, `expr[4]`, `expr[-10:-1]` (inclusive).
+    Index {
+        base: Box<Expr>,
+        selector: IndexSelector,
+        pos: usize,
+    },
     /// External `$name` parameter reference.
     Param {
         name: String,
@@ -36,6 +42,18 @@ pub enum Expr {
         /// True when the source token was an integer (no decimal point).
         is_int: bool,
         pos: usize,
+    },
+}
+
+/// Postfix result selector on a timeseries-valued expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexSelector {
+    /// Single element. Positive = 1-based from start of possible results; negative from end (`-1` = last).
+    Index(i64),
+    /// Inclusive slice. `None` open end = through start/end of possible results.
+    Slice {
+        start: Option<i64>,
+        end: Option<i64>,
     },
 }
 
@@ -63,7 +81,7 @@ pub struct Series {
     /// Bar bucket / reporting period suffix, e.g. `1d`, `1h`, `5m`.
     pub bucket: String,
     pub asset: AssetRef,
-    /// Emit domain. `None` → single latest bar.
+    /// Emit domain. `None` → largest possible result series from available data.
     pub domain: Option<SeriesDomain>,
     pub pos: usize,
 }

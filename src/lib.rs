@@ -6,8 +6,9 @@
 //! Series literals carry the bar bucket and an optional emit domain:
 //!
 //! - `[close.1d; $from:$to]` — daily closes over an absolute ms range
-//! - `[close.1h]` — hourly closes at the latest available bar
-//! - `[close.1d@$benchmark]` — qualified asset, latest bar
+//! - `[close.1h]` — full possible hourly series from available data
+//! - `AVG([close.1d], 14)[-1]` — last SMA value (postfix result slice)
+//! - `[close.1d@$benchmark]` — qualified asset
 //!
 //! Java consumers: enable `--features jni`, build the JAR under `java/` (see README).
 
@@ -25,8 +26,8 @@ mod sem;
 mod jni_bridge;
 
 pub use ast::{
-    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, EmitCount, EmitEnd, Expr, LookbackBound, Series,
-    SeriesDomain,
+    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, EmitCount, EmitEnd, Expr, IndexSelector,
+    LookbackBound, Series, SeriesDomain,
 };
 pub use compile::{
     compile, compile_batch, compile_expr, BindValue, CompiledQuery, CompileRequest, Scaffolds,

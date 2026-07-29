@@ -33,7 +33,7 @@ pub struct CompileRequest {
 pub enum BindValue {
     TextArray(Vec<String>),
     BigInt(i64),
-    /// SQL NULL for optional domain bounds (latest mode).
+    /// SQL NULL for optional domain bounds (full / trailing-latest modes).
     Null,
     Int(i32),
     Text(String),
@@ -147,26 +147,22 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         market_tickers: analysis.market_tickers.iter().cloned().collect(),
     };
 
-    let latest_emit_bars = match &analysis.domain {
-        Domain::Latest => 1,
-        Domain::TrailingLatest { bars } => *bars,
-        Domain::Absolute { .. } => 1, // unused when dirty_* binds are set
-    };
-
     let sql = render_envelope(
         &reporting_period,
         interval,
         &scaffolds,
         &named_windows,
         &value_cols,
-        latest_emit_bars,
+        &analysis.domain,
     );
 
     let (dirty_from, dirty_to) = match &analysis.domain {
         Domain::Absolute { from_ms, to_ms, .. } => {
             (BindValue::BigInt(*from_ms), BindValue::BigInt(*to_ms))
         }
-        Domain::Latest | Domain::TrailingLatest { .. } => (BindValue::Null, BindValue::Null),
+        Domain::Full | Domain::TrailingLatest { .. } | Domain::FromStart { .. } => {
+            (BindValue::Null, BindValue::Null)
+        }
     };
 
     let binds = vec![
@@ -216,6 +212,8 @@ struct Codegen<'a> {
 impl Codegen<'_> {
     fn gen_expr(&mut self, expr: &Expr) -> Result<Frag, Error> {
         match expr {
+            // Result index/slice only restricts emit domain (handled in analyze).
+            Expr::Index { base, .. } => self.gen_expr(base),
             Expr::Series(s) => self.gen_series(s),
             Expr::Literal { value, is_int, .. } => {
                 let sql = if *is_int && value.fract() == 0.0 {
@@ -754,16 +752,107 @@ fn rsi_sql(closes_arr: &str, period: i32) -> String {
     )
 }
 
+/// Bounds CTE: absolute uses dirty_* binds; other domains resolve from available data.
+fn render_bounds_cte(domain: &Domain, reporting_period: &str, interval_ms: i64) -> String {
+    let scan = format!(
+        "CROSS JOIN LATERAL (\n\
+         \x20   SELECT MIN(c.timestamp_start) AS min_ts,\n\
+         \x20          MAX(c.timestamp_start) AS max_ts\n\
+         \x20   FROM core.data c\n\
+         \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
+         \x20   WHERE c.data_type = 'close'\n\
+         \x20     AND c.reporting_period = '{reporting_period}'\n\
+         \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
+         \x20     AND a.canonical_ticker = ANY(p.coins)\n\
+         \x20 ) l"
+    );
+
+    match domain {
+        Domain::Absolute { .. } => "bounds AS (\n\
+             \x20 SELECT\n\
+             \x20   p.dirty_from AS emit_from,\n\
+             \x20   p.dirty_to AS emit_to\n\
+             \x20 FROM params p\n\
+             ),"
+            .to_string(),
+        Domain::Full => format!(
+            "bounds AS (\n\
+             \x20 SELECT\n\
+             \x20   l.min_ts AS emit_from,\n\
+             \x20   l.max_ts AS emit_to\n\
+             \x20 FROM params p\n\
+             \x20 {scan}\n\
+             ),"
+        ),
+        Domain::TrailingLatest { bars, end_offset } => {
+            if *bars == i32::MAX {
+                // `[:-k]` on full series: from min through max - end_offset
+                let end_shift = *end_offset as i64 * interval_ms;
+                format!(
+                    "bounds AS (\n\
+                     \x20 SELECT\n\
+                     \x20   l.min_ts AS emit_from,\n\
+                     \x20   l.max_ts - {end_shift} AS emit_to\n\
+                     \x20 FROM params p\n\
+                     \x20 {scan}\n\
+                     ),"
+                )
+            } else {
+                let end_shift = *end_offset as i64 * interval_ms;
+                let span = (*bars as i64 - 1) * interval_ms;
+                format!(
+                    "bounds AS (\n\
+                     \x20 SELECT\n\
+                     \x20   (l.max_ts - {end_shift}) - {span} AS emit_from,\n\
+                     \x20   l.max_ts - {end_shift} AS emit_to\n\
+                     \x20 FROM params p\n\
+                     \x20 {scan}\n\
+                     ),"
+                )
+            }
+        }
+        Domain::FromStart { start, count } => {
+            // First warmup-complete result ≈ min_ts + (max_lookback-1)*interval.
+            // Result index `start` is `(start-1)` bars after that.
+            let start_shift = format!(
+                "l.min_ts + ((p.max_lookback::bigint + {}::bigint - 2) * {interval_ms})",
+                start
+            );
+            if *count == i32::MAX {
+                format!(
+                    "bounds AS (\n\
+                     \x20 SELECT\n\
+                     \x20   {start_shift} AS emit_from,\n\
+                     \x20   l.max_ts AS emit_to\n\
+                     \x20 FROM params p\n\
+                     \x20 {scan}\n\
+                     ),"
+                )
+            } else {
+                let span = (*count as i64 - 1) * interval_ms;
+                format!(
+                    "bounds AS (\n\
+                     \x20 SELECT\n\
+                     \x20   {start_shift} AS emit_from,\n\
+                     \x20   LEAST(l.max_ts, ({start_shift}) + {span}) AS emit_to\n\
+                     \x20 FROM params p\n\
+                     \x20 {scan}\n\
+                     ),"
+                )
+            }
+        }
+    }
+}
+
 fn render_envelope(
     reporting_period: &str,
     interval_ms: i64,
     scaffolds: &Scaffolds,
     named_windows: &BTreeMap<String, i32>,
     value_cols: &[(String, String, String, String)],
-    latest_emit_bars: i32,
+    domain: &Domain,
 ) -> String {
     let mut sql = String::new();
-    let trailing_offset = (latest_emit_bars as i64 - 1) * interval_ms;
 
     writeln!(
         sql,
@@ -781,25 +870,10 @@ fn render_envelope(
     )
     .unwrap();
 
-    // Absolute: dirty_* binds.
-    // Latest (1 bar) / TrailingLatest(N): dirty_* NULL → end at MAX(ts), start at end-(N-1)*interval.
     writeln!(
         sql,
-        "bounds AS (\n\
-         \x20 SELECT\n\
-         \x20   COALESCE(p.dirty_from, l.ts - {trailing_offset}) AS emit_from,\n\
-         \x20   COALESCE(p.dirty_to, l.ts) AS emit_to\n\
-         \x20 FROM params p\n\
-         \x20 CROSS JOIN LATERAL (\n\
-         \x20   SELECT MAX(c.timestamp_start) AS ts\n\
-         \x20   FROM core.data c\n\
-         \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
-         \x20   WHERE c.data_type = 'close'\n\
-         \x20     AND c.reporting_period = '{reporting_period}'\n\
-         \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
-         \x20     AND a.canonical_ticker = ANY(p.coins)\n\
-         \x20 ) l\n\
-         ),"
+        "{}",
+        render_bounds_cte(domain, reporting_period, interval_ms)
     )
     .unwrap();
 

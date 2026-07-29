@@ -92,8 +92,9 @@ pub enum DomainJson {
         from_ms: i64,
         to_ms: i64,
     },
-    Latest,
-    TrailingLatest { bars: i32 },
+    Full,
+    TrailingLatest { bars: i32, end_offset: i32 },
+    FromStart { start: i32, count: i32 },
 }
 
 impl From<&Domain> for DomainJson {
@@ -110,8 +111,15 @@ impl From<&Domain> for DomainJson {
                 from_ms: *from_ms,
                 to_ms: *to_ms,
             },
-            Domain::Latest => DomainJson::Latest,
-            Domain::TrailingLatest { bars } => DomainJson::TrailingLatest { bars: *bars },
+            Domain::Full => DomainJson::Full,
+            Domain::TrailingLatest { bars, end_offset } => DomainJson::TrailingLatest {
+                bars: *bars,
+                end_offset: *end_offset,
+            },
+            Domain::FromStart { start, count } => DomainJson::FromStart {
+                start: *start,
+                count: *count,
+            },
         }
     }
 }

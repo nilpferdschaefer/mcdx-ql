@@ -26,7 +26,7 @@ let q = compile(&CompileRequest {
 
 // q.sql  — full WITH … SELECT envelope
 // q.binds — coins, dirty_from, dirty_to, after_ts, lim, publish_from, max_lookback, indicators
-//           (dirty_* are NULL when domain is omitted → latest bar)
+//           (dirty_* are NULL when emit bounds come from available data / slices)
 ```
 
 ## Grammar (summary)
@@ -37,15 +37,29 @@ let q = compile(&CompileRequest {
 | Absolute emit range | `[close.1d; $from:$to]` → one row per bar in range |
 | Trailing N bars to date | `[close.1d; 100@$end]` → 100 bars ending at `$end` (inclusive) |
 | Trailing N bars to latest | `[close.1d; 100@latest]` / `[close.1d; $n@latest]` |
-| Latest only (no domain) | `[close.1d]` → single latest bar |
+| Full series (no domain) | `[close.1d]` → largest possible result series from available data |
+| Result index / slice | `AVG([close.1d], 14)[-1]`, `…[4]`, `…[-10:-1]`, `…[4:10]` |
 | Series @ asset | `[close.1d@ETH; 100@$end]`, `[close.1d@$benchmark]` |
 | Trailing window sugar | `AVG([close.1d; 100@$end], $period)` ≡ `AVG(…, t-($period-1), t)` |
 | Lookback | `t`, `t0`, `t-INT`, `t-($period-1)` |
-| Batch | `{ sma_14: AVG([close.1d; 100@latest], 14), … }` |
+| Batch | `{ sma_14: AVG([close.1d], 14)[-1], … }` |
+
+**Array-default results + slices**
+
+Timeseries ops return the **largest possible result series** from the source data (e.g. N closes and an M-period SMA → **N−M+1** values). Reduce with postfix indexing (inclusive slices; positives are **1-based**; negatives count from the end):
+
+| Slice | Meaning |
+|-------|---------|
+| `expr[-1]` | last value |
+| `expr[4]` | 4th possible value |
+| `expr[-10:-1]` | last 10 values |
+| `expr[4:10]` / `expr[:5]` / `expr[-10:]` | inclusive ranges; open ends allowed |
+
+The compiler restricts SQL emit bounds so trailing slices like `[-1]` do not scan more history than needed (beyond lookback padding).
 
 **Emit domain vs lookback**
 
-- **Emit domain** (`$from:$to`, `N@$end`, `N@latest`, or omitted) chooses which bars appear in the result — backpopulate a whole range in **one** query.
+- **Emit domain** (`$from:$to`, `N@$end`, `N@latest`, omitted=full, or a result slice) chooses which bars appear in the result — backpopulate a whole range in **one** query.
 - **Lookback** (`$period` / `t-(N-1), t`) is the window used **at each emit bar** (e.g. 31 for beta).
 
 Example — correlation of BTC vs ETH for 100 daily bars ending 15 May 2026:
@@ -63,8 +77,8 @@ with `assets=["BTC"]`, `params.end` = bar-open ms for 2026-05-15, `params.period
 **Rules**
 
 - Bucket (`.1d` / `.1h` / …) is **required** on every series; all buckets in one expr must match.
-- Domain is optional; omit it for the single latest bar. Prefer `N@$end` / `N@latest` for backfills instead of hand-computing `$from`.
-- All series domains in one expr must resolve to the same emit range.
+- Domain is optional; omit it for the full possible series. Use `[-1]` for the latest value, or `N@$end` / `N@latest` for backfills.
+- All series domains (and result slices) in one expr must resolve to the same emit range.
 - Bare series names / bare identifiers are illegal — series need `[]`, params need `$`.
 - `$name` values come only from request `params` (missing → fail loud).
 - Request-level `dirty_from` / `dirty_to` and conflicting `reporting_period` are rejected.
@@ -103,9 +117,9 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 `CompiledQuery` includes:
 
 - `sql` — CTE pipeline (`params` → `bounds` → `ordered` → `enriched` → optional `market_ret` → `windowed` → `unpivoted` → `ranked`)
-- `binds` — eight positional parameters; `dirty_from`/`dirty_to` are `NULL` in latest mode
+- `binds` — eight positional parameters; `dirty_from`/`dirty_to` are set only for absolute domains
 - `reporting_period` — derived from series bucket (e.g. `1d`)
-- `domain` — `Absolute { from_ms, to_ms, … }` or `Latest`
+- `domain` — `Absolute` / `Full` / `TrailingLatest` / `FromStart`
 - `max_lookback` — pads scan before `emit_from`
 - `scaffolds` / `indicators` — as before
 

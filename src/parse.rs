@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::ast::{
-    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, EmitCount, EmitEnd, Expr, LookbackBound, Series,
-    SeriesDomain, TrailingPeriod, WindowSpec,
+    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, EmitCount, EmitEnd, Expr, IndexSelector,
+    LookbackBound, Series, SeriesDomain, TrailingPeriod, WindowSpec,
 };
 use crate::interval::interval_ms;
 use crate::error::Error;
@@ -151,7 +151,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_multiplicative(&mut self) -> Result<Expr, Error> {
-        let mut left = self.parse_primary()?;
+        let mut left = self.parse_postfix()?;
         loop {
             let op = match self.peek().kind {
                 TokenKind::Star => BinOp::Mul,
@@ -159,7 +159,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_primary()?;
+            let right = self.parse_postfix()?;
             left = Expr::BinOp {
                 op,
                 left: Box::new(left),
@@ -167,6 +167,70 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(left)
+    }
+
+    /// `primary` with optional result index/slice: `AVG(...)[-1]`, `(…)[4:10]`.
+    fn parse_postfix(&mut self) -> Result<Expr, Error> {
+        let mut expr = self.parse_primary()?;
+        while matches!(self.peek().kind, TokenKind::LBracket) {
+            let pos = self.peek().pos;
+            self.advance(); // [
+            let selector = self.parse_index_selector()?;
+            if !matches!(self.peek().kind, TokenKind::RBracket) {
+                return Err(self.err("expected `]` after index/slice", Some(self.peek().pos)));
+            }
+            self.advance();
+            expr = Expr::Index {
+                base: Box::new(expr),
+                selector,
+                pos,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_index_selector(&mut self) -> Result<IndexSelector, Error> {
+        // slice if we see `:` before closing `]`, else single index
+        let start = if matches!(self.peek().kind, TokenKind::Colon) {
+            None
+        } else {
+            Some(self.parse_index_int()?)
+        };
+        if matches!(self.peek().kind, TokenKind::Colon) {
+            self.advance();
+            let end = if matches!(self.peek().kind, TokenKind::RBracket) {
+                None
+            } else {
+                Some(self.parse_index_int()?)
+            };
+            Ok(IndexSelector::Slice { start, end })
+        } else if let Some(i) = start {
+            Ok(IndexSelector::Index(i))
+        } else {
+            Err(self.err("empty index `[]` is illegal", Some(self.peek().pos)))
+        }
+    }
+
+    fn parse_index_int(&mut self) -> Result<i64, Error> {
+        let neg = if matches!(self.peek().kind, TokenKind::Minus) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        match self.advance().kind {
+            TokenKind::Int(v) => {
+                if neg {
+                    Ok(-v)
+                } else {
+                    Ok(v)
+                }
+            }
+            _ => Err(self.err(
+                "expected integer index (e.g. `-1`, `4`, `-10:-1`)",
+                Some(self.peek().pos),
+            )),
+        }
     }
 
     fn parse_primary(&mut self) -> Result<Expr, Error> {
@@ -295,7 +359,7 @@ impl<'a> Parser<'a> {
         //   `$from:$to`     absolute emit range
         //   `100@$end`      N bars ending at `$end`
         //   `$n@latest`     N bars ending at latest available
-        // Omitted → single latest bar.
+        // Omitted → full possible series (reduce with postfix `[-1]`, `[-10:-1]`, …).
         let domain = if matches!(self.peek().kind, TokenKind::Semi) {
             self.advance(); // ;
             Some(self.parse_series_domain()?)
@@ -778,6 +842,40 @@ mod tests {
                 assert!(m.contains_key("ema_14"));
             }
             _ => panic!("expected batch"),
+        }
+    }
+
+    #[test]
+    fn parses_result_index_and_slice() {
+        let e = parse_expr("AVG([close.1d], 14)[-1]").unwrap();
+        match e {
+            Expr::Index {
+                selector: IndexSelector::Index(-1),
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        let e = parse_expr("AVG([close.1d], 14)[-10:-1]").unwrap();
+        match e {
+            Expr::Index {
+                selector: IndexSelector::Slice {
+                    start: Some(-10),
+                    end: Some(-1),
+                },
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        let e = parse_expr("AVG([close.1d], 14)[4:10]").unwrap();
+        match e {
+            Expr::Index {
+                selector: IndexSelector::Slice {
+                    start: Some(4),
+                    end: Some(10),
+                },
+                ..
+            } => {}
+            other => panic!("{other:?}"),
         }
     }
 }

@@ -42,21 +42,57 @@ fn compiles_avg_trailing_sugar() {
     assert_eq!(q.interval_ms, 86_400_000);
     assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_14"));
     assert!(q.sql.contains("bounds AS ("));
-    assert!(q.sql.contains("COALESCE(p.dirty_from, l.ts) AS emit_from"));
+    assert!(q.sql.contains("p.dirty_from AS emit_from"));
+    assert!(q.sql.contains("p.dirty_to AS emit_to"));
     assert_eq!(q.binds[1], BindValue::BigInt(1_700_000_000_000));
     assert_eq!(q.binds[2], BindValue::BigInt(1_700_086_400_000));
 }
 
 #[test]
-fn latest_domain_omitted() {
+fn full_domain_omitted() {
     let q = compile(&req("AVG([close.1d], $period)")).unwrap();
-    assert_eq!(q.domain, Domain::Latest);
+    assert_eq!(q.domain, Domain::Full);
     assert_eq!(q.binds[1], BindValue::Null);
     assert_eq!(q.binds[2], BindValue::Null);
-    // N=1 → emit_from = latest - 0
-    assert!(q.sql.contains("COALESCE(p.dirty_from, l.ts - 0)"));
+    assert!(q.sql.contains("l.min_ts AS emit_from"));
+    assert!(q.sql.contains("l.max_ts AS emit_to"));
     assert!(q.sql.contains("b.emit_from"));
     assert!(q.sql.contains("b.emit_to"));
+}
+
+#[test]
+fn last_result_slice() {
+    let q = compile(&req("AVG([close.1d], $period)[-1]")).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::TrailingLatest {
+            bars: 1,
+            end_offset: 0
+        }
+    );
+    assert!(q.sql.contains("l.max_ts - 0 AS emit_to") || q.sql.contains("l.max_ts AS emit_to"));
+    // emit_from = max - 0 for 1 bar
+    assert!(q.sql.contains("(l.max_ts - 0) - 0 AS emit_from") || q.sql.contains("AS emit_from"));
+}
+
+#[test]
+fn trailing_result_slice() {
+    let q = compile(&req("AVG([close.1d], 14)[-10:-1]")).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::TrailingLatest {
+            bars: 10,
+            end_offset: 0
+        }
+    );
+    assert!(q.sql.contains(&format!("(l.max_ts - 0) - {}", 9_i64 * 86_400_000)));
+}
+
+#[test]
+fn positive_result_index() {
+    let q = compile(&req("AVG([close.1d], 14)[4]")).unwrap();
+    assert_eq!(q.domain, Domain::FromStart { start: 4, count: 1 });
+    assert!(q.sql.contains("p.max_lookback::bigint + 4::bigint - 2"));
 }
 
 #[test]
@@ -89,10 +125,16 @@ fn trailing_bars_ending_at_date() {
 #[test]
 fn trailing_bars_ending_latest() {
     let q = compile(&req("AVG([close.1d; 100@latest], $period)")).unwrap();
-    assert_eq!(q.domain, Domain::TrailingLatest { bars: 100 });
+    assert_eq!(
+        q.domain,
+        Domain::TrailingLatest {
+            bars: 100,
+            end_offset: 0
+        }
+    );
     assert_eq!(q.binds[1], BindValue::Null);
     assert_eq!(q.binds[2], BindValue::Null);
-    assert!(q.sql.contains(&format!("l.ts - {}", 99_i64 * 86_400_000)));
+    assert!(q.sql.contains(&format!("(l.max_ts - 0) - {}", 99_i64 * 86_400_000)));
 }
 
 #[test]

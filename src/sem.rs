@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{
-    AssetRef, BatchExpr, CallOp, EmitCount, EmitEnd, Expr, LookbackBound, Series, SeriesDomain,
-    TrailingPeriod, WindowSpec,
+    AssetRef, BatchExpr, CallOp, EmitCount, EmitEnd, Expr, IndexSelector, LookbackBound, Series,
+    SeriesDomain, TrailingPeriod, WindowSpec,
 };
 use crate::error::Error;
 use crate::interval::interval_ms;
@@ -44,7 +44,7 @@ impl ParamValue {
     }
 }
 
-/// Emit domain resolved from grammar.
+/// Emit domain resolved from grammar (series domain ∩ result slice).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Domain {
     /// Explicit `$from:$to` (inclusive `timestamp_start` ms).
@@ -54,10 +54,14 @@ pub enum Domain {
         from_ms: i64,
         to_ms: i64,
     },
-    /// Domain omitted — evaluate the latest available bar only.
-    Latest,
-    /// `N@latest` / `$n@latest` — emit N bars ending at max available `timestamp_start`.
-    TrailingLatest { bars: i32 },
+    /// Largest possible result series from available source data (default when domain omitted).
+    Full,
+    /// Emit `bars` result bars ending `end_offset` bars before the latest available bar
+    /// (`end_offset = 0` → ending at latest). Used for `N@latest` and negative slices like `[-1]`.
+    TrailingLatest { bars: i32, end_offset: i32 },
+    /// Emit `count` result bars starting at 1-based result index `start` from the first
+    /// warmup-complete bar (`expr[4]` / `expr[4:10]` / `expr[:5]`). `count == i32::MAX` = through end.
+    FromStart { start: i32, count: i32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,7 +125,7 @@ pub fn analyze(
         Error::sem("expression must declare a series bucket (e.g. `[close.1d]`)", expr_src, None)
     })?;
 
-    let domain = ctx.domain.unwrap_or(Domain::Latest);
+    let domain = ctx.domain.unwrap_or(Domain::Full);
     match &domain {
         Domain::Absolute {
             from_param,
@@ -139,7 +143,7 @@ pub fn analyze(
                 ));
             }
         }
-        Domain::TrailingLatest { bars } => {
+        Domain::TrailingLatest { bars, end_offset } => {
             if *bars < 1 {
                 return Err(Error::sem(
                     format!("trailing emit bar count must be >= 1, got {bars}"),
@@ -147,15 +151,38 @@ pub fn analyze(
                     None,
                 ));
             }
+            if *end_offset < 0 {
+                return Err(Error::sem(
+                    format!("trailing end_offset must be >= 0, got {end_offset}"),
+                    expr_src,
+                    None,
+                ));
+            }
         }
-        Domain::Latest => {}
+        Domain::FromStart { start, count } => {
+            if *start < 1 {
+                return Err(Error::sem(
+                    format!("result index must be >= 1, got {start}"),
+                    expr_src,
+                    None,
+                ));
+            }
+            if *count < 1 {
+                return Err(Error::sem(
+                    format!("result slice length must be >= 1, got {count}"),
+                    expr_src,
+                    None,
+                ));
+            }
+        }
+        Domain::Full => {}
     }
 
     // Reject request-level dirty_from/dirty_to if present as params names used wrongly —
     // callers should not pass them; domain comes from grammar.
     if params.contains_key("dirty_from") || params.contains_key("dirty_to") {
         return Err(Error::sem(
-            "request-level dirty_from/dirty_to are rejected; use `$from:$to`, `N@$end`, or `N@latest` in the grammar",
+            "request-level dirty_from/dirty_to are rejected; use `$from:$to`, `N@$end`, `N@latest`, or result slices in the grammar",
             expr_src,
             None,
         ));
@@ -203,6 +230,17 @@ impl<'a> AnalyzeCtx<'a> {
         })
     }
 
+    fn interval(&self, pos: usize) -> Result<i64, Error> {
+        let bucket = self.reporting_period.as_deref().ok_or_else(|| {
+            Error::sem(
+                "result index/slice requires a series bucket",
+                self.expr_src,
+                Some(pos),
+            )
+        })?;
+        interval_ms(bucket).map_err(|e| Error::sem(format!("{e}"), self.expr_src, Some(pos)))
+    }
+
     fn walk_expr(&mut self, expr: &Expr) -> Result<(), Error> {
         match expr {
             Expr::Series(s) => self.walk_series(s),
@@ -214,6 +252,24 @@ impl<'a> AnalyzeCtx<'a> {
             Expr::BinOp { left, right, .. } => {
                 self.walk_expr(left)?;
                 self.walk_expr(right)
+            }
+            Expr::Index {
+                base,
+                selector,
+                pos,
+            } => {
+                self.walk_expr(base)?;
+                let current = self.domain.clone().ok_or_else(|| {
+                    Error::sem(
+                        "result index/slice requires a timeseries expression",
+                        self.expr_src,
+                        Some(*pos),
+                    )
+                })?;
+                let interval = self.interval(*pos)?;
+                let sliced = apply_selector(current, selector, interval, self.expr_src, *pos)?;
+                self.domain = Some(sliced);
+                Ok(())
             }
             Expr::Call {
                 op,
@@ -290,7 +346,7 @@ impl<'a> AnalyzeCtx<'a> {
         }
 
         let resolved = match &s.domain {
-            None => Domain::Latest,
+            None => Domain::Full,
             Some(SeriesDomain::Absolute { from, to }) => {
                 let from_v = self.require_param(&from.name, Some(from.pos))?;
                 let to_v = self.require_param(&to.name, Some(to.pos))?;
@@ -328,7 +384,10 @@ impl<'a> AnalyzeCtx<'a> {
                     Error::sem(format!("{e}"), self.expr_src, Some(s.pos))
                 })?;
                 match end {
-                    EmitEnd::Latest { .. } => Domain::TrailingLatest { bars },
+                    EmitEnd::Latest { .. } => Domain::TrailingLatest {
+                        bars,
+                        end_offset: 0,
+                    },
                     EmitEnd::Param { name, pos: epos } => {
                         let end_v = self.require_param(name, Some(*epos))?;
                         let to_ms = end_v.as_i64().ok_or_else(|| {
@@ -399,23 +458,7 @@ impl<'a> AnalyzeCtx<'a> {
                 self.domain = Some(d.clone());
                 Ok(())
             }
-            (Some(Domain::Latest), Domain::Latest) => Ok(()),
-            (
-                Some(Domain::Absolute {
-                    from_ms: ef,
-                    to_ms: et,
-                    ..
-                }),
-                Domain::Absolute {
-                    from_ms,
-                    to_ms,
-                    ..
-                },
-            ) if ef == from_ms && et == to_ms => Ok(()),
-            (
-                Some(Domain::TrailingLatest { bars: a }),
-                Domain::TrailingLatest { bars: b },
-            ) if a == b => Ok(()),
+            (Some(a), b) if a == b => Ok(()),
             (Some(existing), new) => Err(Error::sem(
                 format!("conflicting series domains in one expr: {existing:?} vs {new:?}"),
                 self.expr_src,
@@ -686,6 +729,435 @@ impl<'a> AnalyzeCtx<'a> {
     }
 }
 
+/// Apply a result index/slice to an already-resolved emit domain.
+fn apply_selector(
+    domain: Domain,
+    selector: &IndexSelector,
+    interval: i64,
+    expr_src: &str,
+    pos: usize,
+) -> Result<Domain, Error> {
+    match selector {
+        IndexSelector::Index(i) => {
+            if *i == 0 {
+                return Err(Error::sem(
+                    "result index `0` is illegal — positives are 1-based, negatives count from the end (`-1` = last)",
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            if *i > 0 {
+                if *i > i32::MAX as i64 {
+                    return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+                }
+                apply_from_start(domain, *i as i32, 1, interval, expr_src, pos)
+            } else {
+                let from_end = -*i;
+                if from_end > i32::MAX as i64 {
+                    return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+                }
+                // Single element: the `from_end`-th bar from the end.
+                apply_trailing(domain, 1, (from_end as i32) - 1, interval, expr_src, pos)
+            }
+        }
+        IndexSelector::Slice { start, end } => match (start, end) {
+            (None, None) => Ok(domain), // `[:]` — no further restriction
+            (Some(s), None) => {
+                if *s == 0 {
+                    return Err(Error::sem(
+                        "result index `0` is illegal — positives are 1-based, negatives count from the end",
+                        expr_src,
+                        Some(pos),
+                    ));
+                }
+                if *s > 0 {
+                    // `[4:]` — from 4 through end
+                    if *s > i32::MAX as i64 {
+                        return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+                    }
+                    apply_from_start(domain, *s as i32, i32::MAX, interval, expr_src, pos)
+                } else {
+                    // `[-10:]` — last 10
+                    let n = -*s;
+                    if n > i32::MAX as i64 {
+                        return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+                    }
+                    apply_trailing(domain, n as i32, 0, interval, expr_src, pos)
+                }
+            }
+            (None, Some(e)) => {
+                if *e == 0 {
+                    return Err(Error::sem(
+                        "result index `0` is illegal — positives are 1-based, negatives count from the end",
+                        expr_src,
+                        Some(pos),
+                    ));
+                }
+                if *e > 0 {
+                    // `[:5]` — first 5
+                    if *e > i32::MAX as i64 {
+                        return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+                    }
+                    apply_from_start(domain, 1, *e as i32, interval, expr_src, pos)
+                } else {
+                    // `[:-k]` — through the k-th from end inclusive
+                    let end_from_end = -*e;
+                    if end_from_end > i32::MAX as i64 {
+                        return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+                    }
+                    apply_through_end_offset(
+                        domain,
+                        (end_from_end as i32) - 1,
+                        interval,
+                        expr_src,
+                        pos,
+                    )
+                }
+            }
+            (Some(s), Some(e)) => resolve_closed_slice(domain, *s, *e, interval, expr_src, pos),
+        },
+    }
+}
+
+fn resolve_closed_slice(
+    domain: Domain,
+    start: i64,
+    end: i64,
+    interval: i64,
+    expr_src: &str,
+    pos: usize,
+) -> Result<Domain, Error> {
+    if start == 0 || end == 0 {
+        return Err(Error::sem(
+            "result index `0` is illegal — positives are 1-based, negatives count from the end",
+            expr_src,
+            Some(pos),
+        ));
+    }
+    if start > 0 && end > 0 {
+        if start > end {
+            return Err(Error::sem(
+                format!("result slice start ({start}) must be <= end ({end})"),
+                expr_src,
+                Some(pos),
+            ));
+        }
+        if end > i32::MAX as i64 {
+            return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+        }
+        let count = (end - start + 1) as i32;
+        return apply_from_start(domain, start as i32, count, interval, expr_src, pos);
+    }
+    if start < 0 && end < 0 {
+        if start > end {
+            // e.g. -1:-10 — invalid order
+            return Err(Error::sem(
+                format!("result slice start ({start}) must be <= end ({end}) when both are negative"),
+                expr_src,
+                Some(pos),
+            ));
+        }
+        // [-10:-1]: start_from_end=10, end_from_end=1
+        let start_from_end = -start;
+        let end_from_end = -end;
+        let bars = start_from_end - end_from_end + 1;
+        if bars > i32::MAX as i64 {
+            return Err(Error::sem("result slice too large", expr_src, Some(pos)));
+        }
+        let end_offset = (end_from_end as i32) - 1;
+        return apply_trailing(domain, bars as i32, end_offset, interval, expr_src, pos);
+    }
+    if start > 0 && end < 0 {
+        // `[4:-1]` — from 4 through last
+        if start > i32::MAX as i64 {
+            return Err(Error::sem("result index out of range", expr_src, Some(pos)));
+        }
+        if end != -1 {
+            return Err(Error::sem(
+                "mixed slices must end at `-1` (through last), e.g. `[4:-1]`",
+                expr_src,
+                Some(pos),
+            ));
+        }
+        return apply_from_start(domain, start as i32, i32::MAX, interval, expr_src, pos);
+    }
+    Err(Error::sem(
+        "unsupported mixed result slice — use both-positive, both-negative, or `[n:-1]`",
+        expr_src,
+        Some(pos),
+    ))
+}
+
+fn apply_from_start(
+    domain: Domain,
+    start: i32,
+    count: i32,
+    interval: i64,
+    expr_src: &str,
+    pos: usize,
+) -> Result<Domain, Error> {
+    match domain {
+        Domain::Full => Ok(Domain::FromStart { start, count }),
+        Domain::Absolute {
+            from_param,
+            to_param,
+            from_ms,
+            to_ms,
+        } => {
+            let new_from = from_ms
+                .checked_add((start as i64 - 1).checked_mul(interval).ok_or_else(|| {
+                    Error::sem("result slice overflow", expr_src, Some(pos))
+                })?)
+                .ok_or_else(|| Error::sem("result slice overflow", expr_src, Some(pos)))?;
+            let new_to = if count == i32::MAX {
+                to_ms
+            } else {
+                let cand = new_from
+                    .checked_add((count as i64 - 1).checked_mul(interval).ok_or_else(|| {
+                        Error::sem("result slice overflow", expr_src, Some(pos))
+                    })?)
+                    .ok_or_else(|| Error::sem("result slice overflow", expr_src, Some(pos)))?;
+                cand.min(to_ms)
+            };
+            if new_from > to_ms {
+                return Err(Error::sem(
+                    format!("result index {start} is past the end of the emit domain"),
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            Ok(Domain::Absolute {
+                from_param,
+                to_param,
+                from_ms: new_from,
+                to_ms: new_to,
+            })
+        }
+        Domain::TrailingLatest { bars, end_offset } => {
+            // Restrict within the trailing window by converting to a smaller trailing window.
+            let last_index = start.saturating_add(count.saturating_sub(1));
+            if count != i32::MAX && last_index > bars {
+                return Err(Error::sem(
+                    format!(
+                        "result slice [{start}:{last_index}] exceeds trailing emit window of {bars} bars"
+                    ),
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            let take = if count == i32::MAX {
+                bars - start + 1
+            } else {
+                count
+            };
+            if take < 1 {
+                return Err(Error::sem(
+                    format!("result index {start} is past the end of the emit domain"),
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            // Window ends at original end; start moves forward by (start-1).
+            // New end_offset stays; new bars = from start to end of window.
+            let new_bars = take;
+            let new_end_offset = end_offset + (bars - (start + take - 1));
+            Ok(Domain::TrailingLatest {
+                bars: new_bars,
+                end_offset: new_end_offset,
+            })
+        }
+        Domain::FromStart {
+            start: base_start,
+            count: base_count,
+        } => {
+            let abs_start = base_start + start - 1;
+            let available = if base_count == i32::MAX {
+                i32::MAX
+            } else {
+                base_count - start + 1
+            };
+            if available < 1 {
+                return Err(Error::sem(
+                    format!("result index {start} is past the end of the emit domain"),
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            let new_count = if count == i32::MAX {
+                available
+            } else {
+                count.min(available)
+            };
+            Ok(Domain::FromStart {
+                start: abs_start,
+                count: new_count,
+            })
+        }
+    }
+}
+
+fn apply_trailing(
+    domain: Domain,
+    bars: i32,
+    end_offset: i32,
+    interval: i64,
+    expr_src: &str,
+    pos: usize,
+) -> Result<Domain, Error> {
+    match domain {
+        Domain::Full => Ok(Domain::TrailingLatest { bars, end_offset }),
+        Domain::Absolute {
+            from_param,
+            to_param,
+            from_ms,
+            to_ms,
+        } => {
+            let new_to = to_ms
+                .checked_sub((end_offset as i64).checked_mul(interval).ok_or_else(|| {
+                    Error::sem("result slice overflow", expr_src, Some(pos))
+                })?)
+                .ok_or_else(|| Error::sem("result slice overflow", expr_src, Some(pos)))?;
+            let new_from = new_to
+                .checked_sub((bars as i64 - 1).checked_mul(interval).ok_or_else(|| {
+                    Error::sem("result slice overflow", expr_src, Some(pos))
+                })?)
+                .ok_or_else(|| Error::sem("result slice overflow", expr_src, Some(pos)))?;
+            Ok(Domain::Absolute {
+                from_param,
+                to_param,
+                from_ms: new_from.max(from_ms),
+                to_ms: new_to.min(to_ms).max(from_ms),
+            })
+        }
+        Domain::TrailingLatest {
+            bars: base_bars,
+            end_offset: base_end,
+        } => {
+            // Compose: take `bars` ending `end_offset` before the current window's end.
+            let new_end = base_end + end_offset;
+            let available_before_end = base_bars;
+            let take = bars.min(available_before_end.saturating_sub(end_offset).max(0));
+            if take < 1 {
+                return Err(Error::sem(
+                    "result slice is empty for this trailing emit window",
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            Ok(Domain::TrailingLatest {
+                bars: take,
+                end_offset: new_end,
+            })
+        }
+        Domain::FromStart { start, count } => {
+            // Trailing slice of a from-start window → shrink from the end.
+            if count == i32::MAX {
+                // Unknown length — keep FromStart and let SQL/runtime pagination handle it
+                // by converting to trailing relative to full series is ambiguous; reject.
+                return Err(Error::sem(
+                    "negative result slices on open-ended `[n:]` domains are unsupported; use an explicit end",
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            let take = bars.min(count.saturating_sub(end_offset).max(0));
+            if take < 1 {
+                return Err(Error::sem(
+                    "result slice is empty for this emit domain",
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            let new_start = start + count - end_offset - take;
+            Ok(Domain::FromStart {
+                start: new_start,
+                count: take,
+            })
+        }
+    }
+}
+
+fn apply_through_end_offset(
+    domain: Domain,
+    end_offset: i32,
+    interval: i64,
+    expr_src: &str,
+    pos: usize,
+) -> Result<Domain, Error> {
+    // `[:-k]` → everything through the k-th from end (inclusive).
+    match domain {
+        Domain::Full => {
+            // Can't bound the start without knowing N; emit through max-end_offset by using
+            // FromStart{1, MAX} clipped via Trailing… — use Absolute-style runtime:
+            // emit_to = max - end_offset*iv, emit_from = min.
+            // Represent as TrailingLatest with bars=i32::MAX? Better add handling in compile
+            // for Full with end clamp. Encode as Absolute-impossible; use FromStart open + note.
+            // Practical: TrailingLatest can't express "all but last offset".
+            // Use a synthetic Absolute at runtime via Full + end_offset bake in compile —
+            // store as TrailingLatest { bars: i32::MAX, end_offset } and teach compile:
+            // if bars == MAX: emit_from = min_ts, emit_to = max - end_offset*iv
+            Ok(Domain::TrailingLatest {
+                bars: i32::MAX,
+                end_offset,
+            })
+        }
+        Domain::Absolute {
+            from_param,
+            to_param,
+            from_ms,
+            to_ms,
+        } => {
+            let new_to = to_ms
+                .checked_sub((end_offset as i64).checked_mul(interval).ok_or_else(|| {
+                    Error::sem("result slice overflow", expr_src, Some(pos))
+                })?)
+                .ok_or_else(|| Error::sem("result slice overflow", expr_src, Some(pos)))?;
+            Ok(Domain::Absolute {
+                from_param,
+                to_param,
+                from_ms,
+                to_ms: new_to.max(from_ms),
+            })
+        }
+        Domain::TrailingLatest { bars, end_offset: base } => {
+            let new_end = base + end_offset;
+            let take = bars.saturating_sub(end_offset);
+            if take < 1 {
+                return Err(Error::sem(
+                    "result slice is empty for this trailing emit window",
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            Ok(Domain::TrailingLatest {
+                bars: take,
+                end_offset: new_end,
+            })
+        }
+        Domain::FromStart { start, count } => {
+            if count == i32::MAX {
+                return Err(Error::sem(
+                    "negative result slices on open-ended `[n:]` domains are unsupported",
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            let take = count.saturating_sub(end_offset);
+            if take < 1 {
+                return Err(Error::sem(
+                    "result slice is empty for this emit domain",
+                    expr_src,
+                    Some(pos),
+                ));
+            }
+            Ok(Domain::FromStart {
+                start,
+                count: take,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,12 +1190,65 @@ mod tests {
     }
 
     #[test]
-    fn analyzes_latest() {
+    fn analyzes_full_default() {
         let src = "AVG([close.1d], $period)";
         let batch = parse_batch(src).unwrap();
         let p = BTreeMap::from([("period".into(), ParamValue::Int(14))]);
         let a = analyze(&batch, &p, src).unwrap();
-        assert_eq!(a.domain, Domain::Latest);
+        assert_eq!(a.domain, Domain::Full);
+    }
+
+    #[test]
+    fn analyzes_last_index() {
+        let src = "AVG([close.1d], $period)[-1]";
+        let batch = parse_batch(src).unwrap();
+        let p = BTreeMap::from([("period".into(), ParamValue::Int(14))]);
+        let a = analyze(&batch, &p, src).unwrap();
+        assert_eq!(
+            a.domain,
+            Domain::TrailingLatest {
+                bars: 1,
+                end_offset: 0
+            }
+        );
+    }
+
+    #[test]
+    fn analyzes_trailing_slice() {
+        let src = "AVG([close.1d], 14)[-10:-1]";
+        let batch = parse_batch(src).unwrap();
+        let a = analyze(&batch, &BTreeMap::new(), src).unwrap();
+        assert_eq!(
+            a.domain,
+            Domain::TrailingLatest {
+                bars: 10,
+                end_offset: 0
+            }
+        );
+    }
+
+    #[test]
+    fn analyzes_positive_index() {
+        let src = "AVG([close.1d], 14)[4]";
+        let batch = parse_batch(src).unwrap();
+        let a = analyze(&batch, &BTreeMap::new(), src).unwrap();
+        assert_eq!(a.domain, Domain::FromStart { start: 4, count: 1 });
+    }
+
+    #[test]
+    fn analyzes_absolute_last() {
+        let src = "AVG([close.1d; $from:$to], $period)[-1]";
+        let batch = parse_batch(src).unwrap();
+        let a = analyze(&batch, &params(14, 100, 200), src).unwrap();
+        // interval ignored for absolute shrink using ms — to stays 200 when interval applied
+        // from_ms/to were 100/200 which are not aligned; shrink uses interval of 1d
+        match a.domain {
+            Domain::Absolute { from_ms, to_ms, .. } => {
+                assert_eq!(to_ms, 200);
+                assert_eq!(from_ms, 200);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
