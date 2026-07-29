@@ -3,9 +3,10 @@
 use std::collections::BTreeMap;
 
 use crate::ast::{
-    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series, TrailingPeriod,
-    WindowSpec,
+    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series, SeriesDomain,
+    TrailingPeriod, WindowSpec,
 };
+use crate::interval::interval_ms;
 use crate::error::Error;
 use crate::lex::{tokenize, Token, TokenKind};
 
@@ -245,6 +246,17 @@ impl<'a> Parser<'a> {
             }
         };
 
+        // Required bucket: `.1d` / `.1h` / `.5m` …
+        if !matches!(self.peek().kind, TokenKind::Dot) {
+            return Err(self.err(
+                "series bucket required — expected `[close.1d]` / `[close.1h]` style",
+                Some(self.peek().pos),
+            ));
+        }
+        let bucket_pos = self.peek().pos;
+        self.advance(); // .
+        let bucket = self.parse_bucket(bucket_pos)?;
+
         let asset = if matches!(self.peek().kind, TokenKind::At) {
             self.advance();
             match &self.peek().kind {
@@ -279,20 +291,19 @@ impl<'a> Parser<'a> {
             AssetRef::Row
         };
 
-        if !matches!(self.peek().kind, TokenKind::Semi) {
-            return Err(self.err(
-                "domain required on series — expected `; $from:$to`",
-                Some(self.peek().pos),
-            ));
-        }
-        self.advance(); // ;
-
-        let from = self.parse_domain_bound()?;
-        if !matches!(self.peek().kind, TokenKind::Colon) {
-            return Err(self.err("expected `:` between domain bounds", Some(self.peek().pos)));
-        }
-        self.advance();
-        let to = self.parse_domain_bound()?;
+        // Optional absolute domain `; $from:$to`. Omitted → latest available bar.
+        let domain = if matches!(self.peek().kind, TokenKind::Semi) {
+            self.advance(); // ;
+            let from = self.parse_domain_bound()?;
+            if !matches!(self.peek().kind, TokenKind::Colon) {
+                return Err(self.err("expected `:` between domain bounds", Some(self.peek().pos)));
+            }
+            self.advance();
+            let to = self.parse_domain_bound()?;
+            Some(SeriesDomain { from, to })
+        } else {
+            None
+        };
 
         if !matches!(self.peek().kind, TokenKind::RBracket) {
             return Err(self.err("expected `]`", Some(self.peek().pos)));
@@ -301,11 +312,49 @@ impl<'a> Parser<'a> {
 
         Ok(Expr::Series(Series {
             name,
+            bucket,
             asset,
-            from,
-            to,
+            domain,
             pos,
         }))
+    }
+
+    /// Parse `1d` / `15m` / `1h` / `1w` after a `.`.
+    fn parse_bucket(&mut self, pos: usize) -> Result<String, Error> {
+        let n_tok = self.advance();
+        let n = match n_tok.kind {
+            TokenKind::Int(v) => v,
+            _ => {
+                return Err(self.err(
+                    "expected bucket like `1d` / `1h` / `5m` after `.`",
+                    Some(n_tok.pos),
+                ))
+            }
+        };
+        let unit_tok = self.advance();
+        let unit = match unit_tok.kind {
+            TokenKind::Ident(s) => s,
+            _ => {
+                return Err(self.err(
+                    "expected bucket unit `m`/`h`/`d`/`w` after size",
+                    Some(unit_tok.pos),
+                ))
+            }
+        };
+        if !matches!(unit.as_str(), "m" | "h" | "d" | "w") {
+            return Err(self.err(
+                format!("unknown bucket unit `{unit}` — use m/h/d/w"),
+                Some(unit_tok.pos),
+            ));
+        }
+        let bucket = format!("{n}{unit}");
+        interval_ms(&bucket).map_err(|_| {
+            self.err(
+                format!("unsupported reporting_period / bucket `{bucket}`"),
+                Some(pos),
+            )
+        })?;
+        Ok(bucket)
     }
 
     fn parse_domain_bound(&mut self) -> Result<DomainBound, Error> {
@@ -508,20 +557,42 @@ mod tests {
 
     #[test]
     fn parses_avg_trailing_sugar() {
-        let e = parse_expr("AVG([close; $from:$to], $period)").unwrap();
+        let e = parse_expr("AVG([close.1d; $from:$to], $period)").unwrap();
         match e {
             Expr::Call {
                 op: CallOp::Avg,
                 window: Some(WindowSpec::Trailing { .. }),
+                args,
                 ..
-            } => {}
+            } => match &args[0] {
+                Expr::Series(s) => {
+                    assert_eq!(s.bucket, "1d");
+                    assert!(s.domain.is_some());
+                }
+                other => panic!("{other:?}"),
+            },
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
+    fn parses_latest_domain() {
+        let e = parse_expr("AVG([close.1h], 14)").unwrap();
+        match e {
+            Expr::Call { args, .. } => match &args[0] {
+                Expr::Series(s) => {
+                    assert_eq!(s.bucket, "1h");
+                    assert!(s.domain.is_none());
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_explicit_lookback() {
-        let e = parse_expr("AVG([close; $from:$to], t-($period-1), t)").unwrap();
+        let e = parse_expr("AVG([close.1d; $from:$to], t-($period-1), t)").unwrap();
         match e {
             Expr::Call {
                 window: Some(WindowSpec::Explicit { .. }),
@@ -532,17 +603,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_domain() {
-        let err = parse_expr("AVG([close], $period)").unwrap_err();
-        assert!(err.message.contains("domain required"));
+    fn rejects_missing_bucket() {
+        let err = parse_expr("AVG([close; $from:$to], $period)").unwrap_err();
+        assert!(err.message.contains("bucket required"));
     }
 
     #[test]
     fn parses_asset_qualifier() {
-        let e = parse_expr("RET([close@TOTALCRYPTOMARKETCAP; $from:$to])").unwrap();
+        let e = parse_expr("RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to])").unwrap();
         match e {
             Expr::Call { args, .. } => match &args[0] {
-                Expr::Series(s) => assert_eq!(s.asset, AssetRef::Literal("TOTALCRYPTOMARKETCAP".into())),
+                Expr::Series(s) => {
+                    assert_eq!(s.asset, AssetRef::Literal("TOTALCRYPTOMARKETCAP".into()));
+                    assert_eq!(s.bucket, "1d");
+                }
                 other => panic!("{other:?}"),
             },
             other => panic!("{other:?}"),
@@ -552,7 +626,7 @@ mod tests {
     #[test]
     fn parses_batch() {
         let b = parse_batch(
-            "{ sma_14: AVG([close; $from:$to], 14), ema_14: EMA([close; $from:$to], 14) }",
+            "{ sma_14: AVG([close.1d; $from:$to], 14), ema_14: EMA([close.1d; $from:$to], 14) }",
         )
         .unwrap();
         match b {

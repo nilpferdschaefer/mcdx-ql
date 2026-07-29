@@ -20,6 +20,7 @@ pub enum TokenKind {
     Semi,
     Colon,
     Comma,
+    Dot,
     Plus,
     Minus,
     Star,
@@ -85,6 +86,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
             ',' => {
                 i += 1;
                 TokenKind::Comma
+            }
+            '.' => {
+                // Bare `.` (series bucket separator). Floats are handled in lex_number
+                // when digits precede the dot, so this only fires for `name.1d`.
+                i += 1;
+                TokenKind::Dot
             }
             '+' => {
                 i += 1;

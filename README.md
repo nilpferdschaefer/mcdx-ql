@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use mcdx_ql::{compile, CompileRequest, ParamValue};
 
 let q = compile(&CompileRequest {
-    expr: "AVG([close; $from:$to], $period)".into(),
-    reporting_period: "1d".into(),
+    expr: "AVG([close.1d; $from:$to], $period)".into(),
+    reporting_period: None, // bucket comes from `.1d` in the grammar
     assets: vec!["BTC".into(), "ETH".into()],
     params: BTreeMap::from([
         ("period".into(), ParamValue::Int(14)),
@@ -25,26 +25,30 @@ let q = compile(&CompileRequest {
 })?;
 
 // q.sql  — full WITH … SELECT envelope
-// q.binds — positional ? binds: coins, dirty_from, dirty_to, after_ts, lim,
-//           publish_from, max_lookback, indicators
+// q.binds — coins, dirty_from, dirty_to, after_ts, lim, publish_from, max_lookback, indicators
+//           (dirty_* are NULL when domain is omitted → latest bar)
 ```
 
 ## Grammar (summary)
 
 | Form | Example |
 |------|---------|
-| Series + domain | `[close; $from:$to]` |
-| Series @ asset | `[close@TOTALCRYPTOMARKETCAP; $from:$to]`, `[close@$benchmark; $from:$to]` |
-| Trailing window sugar | `AVG([close; $from:$to], $period)` ≡ `AVG(…, t-($period-1), t)` |
+| Series + bucket | `[close.1d]`, `[close.1h]`, `[close.5m]` |
+| Series + bucket + domain | `[close.1d; $from:$to]` |
+| Latest (no domain) | `[close.1d]` → emit the latest available bar |
+| Series @ asset | `[close.1d@TOTALCRYPTOMARKETCAP; $from:$to]`, `[close.1d@$benchmark]` |
+| Trailing window sugar | `AVG([close.1d; $from:$to], $period)` ≡ `AVG(…, t-($period-1), t)` |
 | Lookback | `t`, `t0`, `t-INT`, `t-($period-1)` |
-| Batch | `{ sma_14: AVG([close; $from:$to], 14), ema_14: EMA([close; $from:$to], 14) }` |
+| Batch | `{ sma_14: AVG([close.1d], 14), ema_14: EMA([close.1d], 14) }` |
 
 **Rules**
 
-- Domain is required on every series; all domains must resolve to the same `[$from,$to]`.
+- Bucket (`.1d` / `.1h` / …) is **required** on every series; all buckets in one expr must match.
+- Domain `; $from:$to` is optional; omit it to evaluate the latest available `timestamp_start`.
+- When present, all absolute domains must resolve to the same `[$from,$to]`; cannot mix latest + absolute.
 - Bare series names / bare identifiers are illegal — series need `[]`, params need `$`.
 - `$name` values come only from request `params` (missing → fail loud).
-- Request-level `dirty_from` / `dirty_to` in `params` are rejected (domain lives in the grammar).
+- Request-level `dirty_from` / `dirty_to` and conflicting `reporting_period` are rejected (grammar owns domain + bucket).
 - `t` / `t0` are illegal inside the domain slot.
 
 ### Builtins
@@ -65,13 +69,13 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 
 | Stem | Expr |
 |------|------|
-| `sma_14` | `AVG([close; $from:$to], $period)` |
-| `vol_96` | `STD(RET([close; $from:$to]), $period) * SQRT($bars_per_year)` |
-| `ema_48` | `EMA([close; $from:$to], $period)` |
-| `atr_14` | `RMA(TR([close; $from:$to]), $period)` |
-| `rsi_14` | `RSI([close; $from:$to], $period)` |
+| `sma_14` | `AVG([close.1d; $from:$to], $period)` |
+| `vol_96` | `STD(RET([close.1d; $from:$to]), $period) * SQRT($bars_per_year)` |
+| `ema_48` | `EMA([close.1d; $from:$to], $period)` |
+| `atr_14` | `RMA(TR([close.1d; $from:$to]), $period)` |
+| `rsi_14` | `RSI([close.1d; $from:$to], $period)` |
 | `sep_atr` | `(AVG(…, $fast) - AVG(…, $slow)) / RMA(TR(…), $atr)` |
-| `beta_31` | `REGR_SLOPE(RET([close; …]), RET([close@$benchmark; …]), $period)` |
+| `beta_31` | `REGR_SLOPE(RET([close.1d; …]), RET([close.1d@$benchmark; …]), $period)` |
 
 `bb_14` (object mid/upper/lower) is deferred.
 
@@ -79,12 +83,12 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 
 `CompiledQuery` includes:
 
-- `sql` — shared CTE pipeline (`params` → `ordered` → `enriched` → optional `market_ret` → `windowed` → `unpivoted` → `ranked`)
-- `binds` — eight positional parameters matching the `params` CTE
-- `domain` — resolved `{from,to}` ms
-- `max_lookback` — drives `dirty_from - max_lookback * interval_ms` scan padding
-- `scaffolds` — which enriched columns / market CTEs were enabled
-- `indicators` — stem names for the `LATERAL VALUES` unpivot (`value` for single expr; batch keys otherwise)
+- `sql` — CTE pipeline (`params` → `bounds` → `ordered` → `enriched` → optional `market_ret` → `windowed` → `unpivoted` → `ranked`)
+- `binds` — eight positional parameters; `dirty_from`/`dirty_to` are `NULL` in latest mode
+- `reporting_period` — derived from series bucket (e.g. `1d`)
+- `domain` — `Absolute { from_ms, to_ms, … }` or `Latest`
+- `max_lookback` — pads scan before `emit_from`
+- `scaffolds` / `indicators` — as before
 
 SQL columns → response fields (§4.6): `coin`→`asset`, plus `timestamp_*` / `value` / `version` / `warmup_complete`. Use `map_sql_row` for scalar-vs-object discrimination. Null computed values are filtered in SQL (`WHERE u.value IS NOT NULL`).
 

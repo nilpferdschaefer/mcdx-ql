@@ -17,7 +17,9 @@ use crate::EMPTY_PARAMS_HASH;
 pub struct CompileRequest {
     /// Grammar source: a single expr or a `{ name: expr, ... }` batch.
     pub expr: String,
-    pub reporting_period: String,
+    /// Optional echo/check of bucket. Grammar owns the period via `[close.1d]`;
+    /// if set here it must match every series bucket.
+    pub reporting_period: Option<String>,
     pub assets: Vec<String>,
     pub params: BTreeMap<String, ParamValue>,
     /// Exclusive pagination cursor (`-1` = first page).
@@ -31,6 +33,8 @@ pub struct CompileRequest {
 pub enum BindValue {
     TextArray(Vec<String>),
     BigInt(i64),
+    /// SQL NULL for optional domain bounds (latest mode).
+    Null,
     Int(i32),
     Text(String),
 }
@@ -76,11 +80,24 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         return Err(Error::compile("limit must be >= 1", &req.expr));
     }
 
-    let interval = interval_ms(&req.reporting_period).map_err(|e| {
+    let analysis = analyze(batch, &req.params, &req.expr)?;
+
+    if let Some(req_period) = &req.reporting_period {
+        if req_period != &analysis.reporting_period {
+            return Err(Error::compile(
+                format!(
+                    "request reporting_period `{req_period}` conflicts with grammar bucket `{}`",
+                    analysis.reporting_period
+                ),
+                &req.expr,
+            ));
+        }
+    }
+
+    let reporting_period = analysis.reporting_period.clone();
+    let interval = interval_ms(&reporting_period).map_err(|e| {
         Error::compile(format!("{e}"), &req.expr)
     })?;
-
-    let analysis = analyze(batch, &req.params, &req.expr)?;
 
     let indicators: Vec<String> = match batch {
         BatchExpr::Single(_) => vec!["value".to_string()],
@@ -94,7 +111,7 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
     let mut cg = Codegen {
         params: &req.params,
         analysis: &analysis,
-        reporting_period: &req.reporting_period,
+        reporting_period: &reporting_period,
         named_windows: &mut named_windows,
         expr_src: &req.expr,
     };
@@ -131,17 +148,24 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
     };
 
     let sql = render_envelope(
-        &req.reporting_period,
+        &reporting_period,
         interval,
         &scaffolds,
         &named_windows,
         &value_cols,
     );
 
+    let (dirty_from, dirty_to) = match &analysis.domain {
+        Domain::Absolute { from_ms, to_ms, .. } => {
+            (BindValue::BigInt(*from_ms), BindValue::BigInt(*to_ms))
+        }
+        Domain::Latest => (BindValue::Null, BindValue::Null),
+    };
+
     let binds = vec![
         BindValue::TextArray(req.assets.clone()),
-        BindValue::BigInt(analysis.domain.from_ms),
-        BindValue::BigInt(analysis.domain.to_ms),
+        dirty_from,
+        dirty_to,
         BindValue::BigInt(req.after_ts),
         BindValue::Int(req.limit),
         BindValue::BigInt(req.publish_from.unwrap_or(i64::MIN)),
@@ -152,7 +176,7 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
     Ok(CompiledQuery {
         sql,
         binds,
-        reporting_period: req.reporting_period.clone(),
+        reporting_period,
         expr: req.expr.clone(),
         domain: analysis.domain.clone(),
         indicators,
@@ -748,7 +772,28 @@ fn render_envelope(
     )
     .unwrap();
 
-    // ordered
+    // Absolute binds, or latest: COALESCE to MAX(timestamp_start) over coins.
+    writeln!(
+        sql,
+        "bounds AS (\n\
+         \x20 SELECT\n\
+         \x20   COALESCE(p.dirty_from, l.ts) AS emit_from,\n\
+         \x20   COALESCE(p.dirty_to, l.ts) AS emit_to\n\
+         \x20 FROM params p\n\
+         \x20 CROSS JOIN LATERAL (\n\
+         \x20   SELECT MAX(c.timestamp_start) AS ts\n\
+         \x20   FROM core.data c\n\
+         \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
+         \x20   WHERE c.data_type = 'close'\n\
+         \x20     AND c.reporting_period = '{reporting_period}'\n\
+         \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
+         \x20     AND a.canonical_ticker = ANY(p.coins)\n\
+         \x20 ) l\n\
+         ),"
+    )
+    .unwrap();
+
+    // ordered — scan pads lookback before emit_from
     writeln!(
         sql,
         "ordered AS (\n\
@@ -764,12 +809,13 @@ fn render_envelope(
          \x20 FROM core.data c\n\
          \x20 JOIN core.mcdx_asset a ON a.id = c.asset\n\
          \x20 CROSS JOIN params p\n\
+         \x20 CROSS JOIN bounds b\n\
          \x20 WHERE c.data_type = 'close'\n\
          \x20   AND c.reporting_period = '{reporting_period}'\n\
          \x20   AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
          \x20   AND a.canonical_ticker = ANY(p.coins)\n\
-         \x20   AND c.timestamp_start >= p.dirty_from - (p.max_lookback::bigint * {interval_ms})\n\
-         \x20   AND c.timestamp_start <= GREATEST(p.dirty_to, p.dirty_from)\n\
+         \x20   AND c.timestamp_start >= b.emit_from - (p.max_lookback::bigint * {interval_ms})\n\
+         \x20   AND c.timestamp_start <= b.emit_to\n\
          ),"
     )
     .unwrap();
@@ -843,12 +889,13 @@ fn render_envelope(
              \x20   FROM core.data c\n\
              \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
              \x20   CROSS JOIN params p\n\
+             \x20   CROSS JOIN bounds b\n\
              \x20   WHERE c.data_type = 'close'\n\
              \x20     AND c.reporting_period = '{reporting_period}'\n\
              \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
              \x20     AND a.canonical_ticker = '{ticker}'\n\
-             \x20     AND c.timestamp_start >= p.dirty_from - (p.max_lookback::bigint * {interval_ms})\n\
-             \x20     AND c.timestamp_start <= GREATEST(p.dirty_to, p.dirty_from)\n\
+             \x20     AND c.timestamp_start >= b.emit_from - (p.max_lookback::bigint * {interval_ms})\n\
+             \x20     AND c.timestamp_start <= b.emit_to\n\
              \x20 ) r\n\
              \x20 WHERE r.bar_ret IS NOT NULL\n\
              ),"
@@ -916,11 +963,12 @@ fn render_envelope(
     writeln!(
         sql,
         "  ) AS u(indicator, value, version, warmup_complete)\n\
+         \x20 CROSS JOIN bounds b\n\
          \x20 WHERE u.value IS NOT NULL\n\
          \x20   AND w.timestamp_start >= COALESCE(NULLIF(p.publish_from, -9223372036854775808), -9223372036854775808)\n\
          \x20   AND w.timestamp_start > COALESCE(p.after_ts, -9223372036854775808)\n\
-         \x20   AND w.timestamp_start >= p.dirty_from\n\
-         \x20   AND w.timestamp_start <= p.dirty_to\n\
+         \x20   AND w.timestamp_start >= b.emit_from\n\
+         \x20   AND w.timestamp_start <= b.emit_to\n\
          \x20   AND u.indicator = ANY(p.indicators)\n\
          ),"
     )

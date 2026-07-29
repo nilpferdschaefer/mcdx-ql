@@ -60,10 +60,18 @@ pub enum TrailingPeriod {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Series {
     pub name: String,
+    /// Bar bucket / reporting period suffix, e.g. `1d`, `1h`, `5m`.
+    pub bucket: String,
     pub asset: AssetRef,
+    /// Absolute emit domain `$from:$to`. `None` → latest available bar.
+    pub domain: Option<SeriesDomain>,
+    pub pos: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesDomain {
     pub from: DomainBound,
     pub to: DomainBound,
-    pub pos: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

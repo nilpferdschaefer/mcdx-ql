@@ -2,6 +2,12 @@
 //!
 //! Parses the MCDX indicator grammar and compiles it to the shared CTE pipeline
 //! that analytics runs against `core.data`.
+//!
+//! Series literals carry the bar bucket and an optional emit domain:
+//!
+//! - `[close.1d; $from:$to]` — daily closes over an absolute ms range
+//! - `[close.1h]` — hourly closes at the latest available bar
+//! - `[close.1d@$benchmark]` — qualified asset, latest bar
 
 mod ast;
 mod compile;
@@ -12,7 +18,9 @@ mod parse;
 mod result_map;
 mod sem;
 
-pub use ast::{AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series};
+pub use ast::{
+    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series, SeriesDomain,
+};
 pub use compile::{
     compile, compile_batch, compile_expr, BindValue, CompiledQuery, CompileRequest, Scaffolds,
 };

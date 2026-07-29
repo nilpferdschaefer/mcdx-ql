@@ -42,17 +42,25 @@ impl ParamValue {
     }
 }
 
+/// Emit domain resolved from grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Domain {
-    pub from_param: String,
-    pub to_param: String,
-    pub from_ms: i64,
-    pub to_ms: i64,
+pub enum Domain {
+    /// Explicit `$from:$to` (inclusive `timestamp_start` ms).
+    Absolute {
+        from_param: String,
+        to_param: String,
+        from_ms: i64,
+        to_ms: i64,
+    },
+    /// Domain omitted — evaluate the latest available bar only.
+    Latest,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Analysis {
     pub domain: Domain,
+    /// Unified bar bucket from series literals (`1d`, `1h`, …).
+    pub reporting_period: String,
     pub max_lookback: i32,
     pub needs_bar_ret: bool,
     pub needs_closes_to_date: bool,
@@ -73,6 +81,8 @@ pub fn analyze(
         params,
         expr_src,
         domain: None,
+        reporting_period: None,
+        saw_series: false,
         max_lookback: 0,
         needs_bar_ret: false,
         needs_closes_to_date: false,
@@ -95,23 +105,35 @@ pub fn analyze(
         }
     }
 
-    let domain = ctx.domain.ok_or_else(|| {
-        Error::sem(
-            "expression must contain at least one series with a domain",
-            expr_src,
-            None,
-        )
-    })?;
-
-    if domain.from_ms > domain.to_ms {
+    if !ctx.saw_series {
         return Err(Error::sem(
-            format!(
-                "domain requires ${} <= ${} (got {} > {})",
-                domain.from_param, domain.to_param, domain.from_ms, domain.to_ms
-            ),
+            "expression must contain at least one series literal",
             expr_src,
             None,
         ));
+    }
+
+    let reporting_period = ctx.reporting_period.ok_or_else(|| {
+        Error::sem("expression must declare a series bucket (e.g. `[close.1d]`)", expr_src, None)
+    })?;
+
+    let domain = ctx.domain.unwrap_or(Domain::Latest);
+    if let Domain::Absolute {
+        from_param,
+        to_param,
+        from_ms,
+        to_ms,
+    } = &domain
+    {
+        if from_ms > to_ms {
+            return Err(Error::sem(
+                format!(
+                    "domain requires ${from_param} <= ${to_param} (got {from_ms} > {to_ms})"
+                ),
+                expr_src,
+                None,
+            ));
+        }
     }
 
     // Reject request-level dirty_from/dirty_to if present as params names used wrongly —
@@ -119,7 +141,7 @@ pub fn analyze(
     // exist as params but are not referenced, still fail loud per spec.
     if params.contains_key("dirty_from") || params.contains_key("dirty_to") {
         return Err(Error::sem(
-            "request-level dirty_from/dirty_to are rejected; express domain as series `$from:$to`",
+            "request-level dirty_from/dirty_to are rejected; express domain as series `$from:$to` or omit for latest",
             expr_src,
             None,
         ));
@@ -127,6 +149,7 @@ pub fn analyze(
 
     Ok(Analysis {
         domain,
+        reporting_period,
         max_lookback: ctx.max_lookback.max(1),
         needs_bar_ret: ctx.needs_bar_ret,
         needs_closes_to_date: ctx.needs_closes_to_date,
@@ -142,6 +165,8 @@ struct AnalyzeCtx<'a> {
     params: &'a BTreeMap<String, ParamValue>,
     expr_src: &'a str,
     domain: Option<Domain>,
+    reporting_period: Option<String>,
+    saw_series: bool,
     max_lookback: i32,
     needs_bar_ret: bool,
     needs_closes_to_date: bool,
@@ -214,7 +239,23 @@ impl<'a> AnalyzeCtx<'a> {
                 ));
             }
         }
+        self.saw_series = true;
         self.series_names.insert(s.name.clone());
+
+        match &self.reporting_period {
+            None => self.reporting_period = Some(s.bucket.clone()),
+            Some(existing) if existing == &s.bucket => {}
+            Some(existing) => {
+                return Err(Error::sem(
+                    format!(
+                        "all series buckets must match; got `{existing}` vs `{}`",
+                        s.bucket
+                    ),
+                    self.expr_src,
+                    Some(s.pos),
+                ));
+            }
+        }
 
         match &s.asset {
             AssetRef::Row => {}
@@ -234,43 +275,72 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
 
-        let from_v = self.require_param(&s.from.name, Some(s.from.pos))?;
-        let to_v = self.require_param(&s.to.name, Some(s.to.pos))?;
-        let from_ms = from_v.as_i64().ok_or_else(|| {
-            Error::sem(
-                format!("domain param `${}` must be integer epoch-ms", s.from.name),
-                self.expr_src,
-                Some(s.from.pos),
-            )
-        })?;
-        let to_ms = to_v.as_i64().ok_or_else(|| {
-            Error::sem(
-                format!("domain param `${}` must be integer epoch-ms", s.to.name),
-                self.expr_src,
-                Some(s.to.pos),
-            )
-        })?;
-
-        let domain = Domain {
-            from_param: s.from.name.clone(),
-            to_param: s.to.name.clone(),
-            from_ms,
-            to_ms,
-        };
-
-        if let Some(existing) = &self.domain {
-            if existing.from_ms != domain.from_ms || existing.to_ms != domain.to_ms {
-                return Err(Error::sem(
-                    format!(
-                        "all series domains must resolve to the same [$from,$to]; got [{},{}] vs [{},{}]",
-                        existing.from_ms, existing.to_ms, domain.from_ms, domain.to_ms
-                    ),
-                    self.expr_src,
-                    Some(s.pos),
-                ));
+        match &s.domain {
+            None => {
+                // Latest mode. Mixing absolute + latest in one expr is loud-fail.
+                match &self.domain {
+                    None => self.domain = Some(Domain::Latest),
+                    Some(Domain::Latest) => {}
+                    Some(Domain::Absolute { .. }) => {
+                        return Err(Error::sem(
+                            "cannot mix absolute `$from:$to` domains with latest-only series in one expr",
+                            self.expr_src,
+                            Some(s.pos),
+                        ));
+                    }
+                }
             }
-        } else {
-            self.domain = Some(domain);
+            Some(dom) => {
+                let from_v = self.require_param(&dom.from.name, Some(dom.from.pos))?;
+                let to_v = self.require_param(&dom.to.name, Some(dom.to.pos))?;
+                let from_ms = from_v.as_i64().ok_or_else(|| {
+                    Error::sem(
+                        format!("domain param `${}` must be integer epoch-ms", dom.from.name),
+                        self.expr_src,
+                        Some(dom.from.pos),
+                    )
+                })?;
+                let to_ms = to_v.as_i64().ok_or_else(|| {
+                    Error::sem(
+                        format!("domain param `${}` must be integer epoch-ms", dom.to.name),
+                        self.expr_src,
+                        Some(dom.to.pos),
+                    )
+                })?;
+
+                let domain = Domain::Absolute {
+                    from_param: dom.from.name.clone(),
+                    to_param: dom.to.name.clone(),
+                    from_ms,
+                    to_ms,
+                };
+
+                match &self.domain {
+                    None => self.domain = Some(domain),
+                    Some(Domain::Latest) => {
+                        return Err(Error::sem(
+                            "cannot mix absolute `$from:$to` domains with latest-only series in one expr",
+                            self.expr_src,
+                            Some(s.pos),
+                        ));
+                    }
+                    Some(Domain::Absolute {
+                        from_ms: ef,
+                        to_ms: et,
+                        ..
+                    }) => {
+                        if *ef != from_ms || *et != to_ms {
+                            return Err(Error::sem(
+                                format!(
+                                    "all series domains must resolve to the same [$from,$to]; got [{ef},{et}] vs [{from_ms},{to_ms}]"
+                                ),
+                                self.expr_src,
+                                Some(s.pos),
+                            ));
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -552,29 +622,55 @@ mod tests {
 
     #[test]
     fn analyzes_avg() {
-        let src = "AVG([close; $from:$to], $period)";
+        let src = "AVG([close.1d; $from:$to], $period)";
         let batch = parse_batch(src).unwrap();
         let a = analyze(&batch, &params(14, 100, 200), src).unwrap();
         assert_eq!(a.max_lookback, 14);
-        assert_eq!(a.domain.from_ms, 100);
-        assert_eq!(a.domain.to_ms, 200);
+        assert_eq!(a.reporting_period, "1d");
+        match a.domain {
+            Domain::Absolute {
+                from_ms, to_ms, ..
+            } => {
+                assert_eq!(from_ms, 100);
+                assert_eq!(to_ms, 200);
+            }
+            Domain::Latest => panic!("expected absolute"),
+        }
+    }
+
+    #[test]
+    fn analyzes_latest() {
+        let src = "AVG([close.1d], $period)";
+        let batch = parse_batch(src).unwrap();
+        let p = BTreeMap::from([("period".into(), ParamValue::Int(14))]);
+        let a = analyze(&batch, &p, src).unwrap();
+        assert_eq!(a.domain, Domain::Latest);
     }
 
     #[test]
     fn rejects_domain_mismatch() {
         let mut p = params(14, 100, 200);
         p.insert("from2".into(), ParamValue::Int(50));
-        let src = "AVG([close; $from:$to], $period) + AVG([close; $from2:$to], $period)";
+        let src =
+            "AVG([close.1d; $from:$to], $period) + AVG([close.1d; $from2:$to], $period)";
         let batch = parse_batch(src).unwrap();
         let err = analyze(&batch, &p, src).unwrap_err();
         assert!(err.message.contains("same"));
     }
 
     #[test]
+    fn rejects_bucket_mismatch() {
+        let src = "AVG([close.1d; $from:$to], $period) + AVG([close.1h; $from:$to], $period)";
+        let batch = parse_batch(src).unwrap();
+        let err = analyze(&batch, &params(14, 100, 200), src).unwrap_err();
+        assert!(err.message.contains("buckets must match"));
+    }
+
+    #[test]
     fn rejects_dirty_params() {
         let mut p = params(14, 100, 200);
         p.insert("dirty_from".into(), ParamValue::Int(1));
-        let src = "AVG([close; $from:$to], $period)";
+        let src = "AVG([close.1d; $from:$to], $period)";
         let batch = parse_batch(src).unwrap();
         assert!(analyze(&batch, &p, src).is_err());
     }
