@@ -195,6 +195,34 @@ fn compiles_ema_close_sql_shape() {
 }
 
 #[test]
+fn period_indicators_use_finite_version_window() {
+    // Regression: EMA/RMA/RSI version must match SMA's ROWS BETWEEN (N-1)
+    // PRECEDING frame — not UNBOUNDED PRECEDING (which pulls older versions).
+    for expr in [
+        "EMA([close.1h; $from:$to], $period)",
+        "RMA(TR([close.1h; $from:$to]), $period)",
+        "RSI([close.1h; $from:$to], $period)",
+        "AVG([close.1h; $from:$to], $period)",
+    ] {
+        let q = compile(&req(expr)).unwrap();
+        assert!(
+            q.sql.contains("MAX(e.version) OVER w_close_1h_14"),
+            "expected finite version window for {expr}"
+        );
+        assert!(
+            !q.sql.contains(
+                "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+            ),
+            "version must not use UNBOUNDED PRECEDING for {expr}"
+        );
+        assert!(
+            q.sql.contains("ROWS BETWEEN 13 PRECEDING AND CURRENT ROW"),
+            "named window must be finite 14-bar frame for {expr}"
+        );
+    }
+}
+
+#[test]
 fn compiles_atr_wilder_seed_bars() {
     let q = compile(&req("RMA(TR([close.1d; $from:$to]), $period)")).unwrap();
     assert!(q.sql.contains("WHERE t.ord BETWEEN 2 AND 15"));
@@ -237,6 +265,24 @@ fn worked_mapping_vol_96() {
 }
 
 #[test]
+fn vol_version_skips_constant_scale_and_avoids_min_bigint_cast() {
+    // Regression: STD * SQRT($bars_per_year) must not wrap version in
+    // GREATEST(COALESCE(…, -9223372036854775808::bigint), …) — that cast
+    // fails Postgres parse (`bigint out of range`). Emit plain MAX like v1.
+    let mut r = req(
+        "{ vol_14: STD(RET([close.1h; $from:$to]), 14) * SQRT($bars_per_year), \
+           vol_31: STD(RET([close.1h; $from:$to]), 31) * SQRT($bars_per_year) }",
+    );
+    r.params
+        .insert("bars_per_year".into(), ParamValue::Int(8760));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("MAX(e.version) OVER w_ret_1h_14 AS ver_0"));
+    assert!(q.sql.contains("MAX(e.version) OVER w_ret_1h_31 AS ver_1"));
+    assert!(!q.sql.contains("-9223372036854775808::bigint"));
+    assert!(!q.sql.contains("COALESCE(MAX(e.version)"));
+}
+
+#[test]
 fn worked_mapping_sep_atr() {
     let mut r = req(
         "(AVG([close.1d; $from:$to], $fast) - AVG([close.1d; $from:$to], $slow)) / RMA(TR([close.1d; $from:$to]), $atr)",
@@ -247,6 +293,38 @@ fn worked_mapping_sep_atr() {
     let q = compile(&r).unwrap();
     assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_5"));
     assert_eq!(q.max_lookback, 50);
+}
+
+#[test]
+fn sep_atr_version_is_greatest_of_finite_windows_only() {
+    // Regression: sep_atr version = GREATEST of w_close_{atr,fast,slow} only —
+    // no UNBOUNDED PRECEDING arm, no Long.MIN_VALUE::bigint cast.
+    let mut r = req(
+        "{ sep_atr: (AVG([close.1h; $from:$to], $fast) - AVG([close.1h; $from:$to], $slow)) \
+           / RMA(TR([close.1h; $from:$to]), $atr) }",
+    );
+    r.params.insert("atr".into(), ParamValue::Int(14));
+    r.params.insert("fast".into(), ParamValue::Int(48));
+    r.params.insert("slow".into(), ParamValue::Int(96));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("MAX(e.version) OVER w_close_1h_48"));
+    assert!(q.sql.contains("MAX(e.version) OVER w_close_1h_96"));
+    assert!(q.sql.contains("MAX(e.version) OVER w_close_1h_14"));
+    assert!(q.sql.contains("GREATEST("));
+    assert!(!q.sql.contains("-9223372036854775808::bigint"));
+    assert!(
+        !q.sql.contains(
+            "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+        ),
+        "sep_atr version must not include an unbounded ATR arm"
+    );
+    for period in [14, 48, 96] {
+        let preceding = period - 1;
+        assert!(
+            q.sql.contains(&format!("ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW")),
+            "missing finite window for period {period}"
+        );
+    }
 }
 
 #[test]

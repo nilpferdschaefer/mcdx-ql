@@ -262,11 +262,7 @@ impl Codegen<'_> {
                         op.as_sql(),
                         r.value_sql
                     ),
-                    version_sql: format!(
-                        "GREATEST({}, {})",
-                        null_to_min(&l.version_sql),
-                        null_to_min(&r.version_sql)
-                    ),
+                    version_sql: combine_versions(&[l.version_sql.clone(), r.version_sql.clone()]),
                     warmup_sql: format!("({} AND {})", l.warmup_sql, r.warmup_sql),
                     period: None,
                     series_key: None,
@@ -416,10 +412,12 @@ impl Codegen<'_> {
             CallOp::Ema => {
                 let _inner = self.gen_expr(&args[0])?;
                 let period = self.resolve_period(window, pos)?;
+                // Value uses inception closes_to_date; version matches SMA's finite period frame.
+                let win = self.ensure_trailing_window("close", period);
                 let value_sql = ema_sql("e.closes_to_date", period);
                 Ok(Frag {
                     value_sql,
-                    version_sql: "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)".into(),
+                    version_sql: format!("MAX(e.version) OVER {win}"),
                     warmup_sql: format!("(array_length(e.closes_to_date, 1) >= {period})"),
                     period: Some(period),
                     series_key: Some("close".into()),
@@ -436,9 +434,11 @@ impl Codegen<'_> {
                     ));
                 }
                 let _ = self.gen_expr(&args[0])?;
+                // Value uses inception closes_to_date; version matches SMA's finite period frame.
+                let win = self.ensure_trailing_window("close", period);
                 Ok(Frag {
                     value_sql: rma_tr_sql("e.closes_to_date", period),
-                    version_sql: "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)".into(),
+                    version_sql: format!("MAX(e.version) OVER {win}"),
                     warmup_sql: format!("(array_length(e.closes_to_date, 1) >= {})", period + 1),
                     period: Some(period),
                     series_key: Some("close".into()),
@@ -447,9 +447,11 @@ impl Codegen<'_> {
             CallOp::Rsi => {
                 let _inner = self.gen_expr(&args[0])?;
                 let period = self.resolve_period(window, pos)?;
+                // Value uses inception closes_to_date; version matches SMA's finite period frame.
+                let win = self.ensure_trailing_window("close", period);
                 Ok(Frag {
                     value_sql: rsi_sql("e.closes_to_date", period),
-                    version_sql: "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)".into(),
+                    version_sql: format!("MAX(e.version) OVER {win}"),
                     warmup_sql: format!("(array_length(e.closes_to_date, 1) >= {})", period + 1),
                     period: Some(period),
                     series_key: Some("close".into()),
@@ -496,11 +498,7 @@ impl Codegen<'_> {
                 let b = self.gen_expr(&args[1])?;
                 Ok(Frag {
                     value_sql: format!("POWER({}, {})", a.value_sql, b.value_sql),
-                    version_sql: format!(
-                        "GREATEST({}, {})",
-                        null_to_min(&a.version_sql),
-                        null_to_min(&b.version_sql)
-                    ),
+                    version_sql: combine_versions(&[a.version_sql.clone(), b.version_sql.clone()]),
                     warmup_sql: format!("({} AND {})", a.warmup_sql, b.warmup_sql),
                     period: None,
                     series_key: None,
@@ -512,11 +510,11 @@ impl Codegen<'_> {
                     .map(|a| self.gen_expr(a))
                     .collect::<Result<_, _>>()?;
                 let vals: Vec<_> = frags.iter().map(|f| f.value_sql.clone()).collect();
-                let vers: Vec<_> = frags.iter().map(|f| null_to_min(&f.version_sql)).collect();
+                let vers: Vec<_> = frags.iter().map(|f| f.version_sql.clone()).collect();
                 let warms: Vec<_> = frags.iter().map(|f| format!("({})", f.warmup_sql)).collect();
                 Ok(Frag {
                     value_sql: format!("GREATEST({})", vals.join(", ")),
-                    version_sql: format!("GREATEST({})", vers.join(", ")),
+                    version_sql: combine_versions(&vers),
                     warmup_sql: warms.join(" AND "),
                     period: None,
                     series_key: None,
@@ -564,11 +562,22 @@ impl Codegen<'_> {
     }
 }
 
-fn null_to_min(sql: &str) -> String {
-    if sql == "NULL::bigint" {
-        "-9223372036854775808::bigint".into()
-    } else {
-        format!("COALESCE({sql}, -9223372036854775808::bigint)")
+/// Merge version expressions for multi-operand forms.
+///
+/// Compile-time `NULL::bigint` (literals / numeric params) is dropped so
+/// `STD(...) * SQRT($bars_per_year)` emits a plain `MAX(version) OVER w_…`
+/// like v1, instead of `GREATEST(COALESCE(…, Long.MIN_VALUE::bigint), …)`.
+/// Bare `-9223372036854775808::bigint` is rejected by Postgres at parse time.
+fn combine_versions(versions: &[String]) -> String {
+    let non_null: Vec<&str> = versions
+        .iter()
+        .map(String::as_str)
+        .filter(|v| *v != "NULL::bigint")
+        .collect();
+    match non_null.as_slice() {
+        [] => "NULL::bigint".into(),
+        [only] => (*only).to_string(),
+        many => format!("GREATEST({})", many.join(", ")),
     }
 }
 
