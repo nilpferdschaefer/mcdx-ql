@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: test / clippy / docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rust-docs
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Rustdoc
+        run: cargo doc --no-deps --document-private-items
+
+  package:
+    name: package crate + docs artifact
+    runs-on: ubuntu-latest
+    needs: test
+    # Package on main and on PRs so consumers can grab a PR build if needed.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build package bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          cargo package --no-verify
+          cargo doc --no-deps --document-private-items
+
+          DEST="dist/mcdx_ql-${VERSION}"
+          mkdir -p "${DEST}/docs"
+          cp "target/package/mcdx_ql-${VERSION}.crate" "${DEST}/"
+          cp -a target/doc/. "${DEST}/docs/"
+
+          printf '%s\n' \
+            "mcdx_ql ${VERSION}" \
+            "" \
+            "Contents:" \
+            "  mcdx_ql-${VERSION}.crate  — cargo package" \
+            "  docs/                    — rustdoc HTML (open docs/mcdx_ql/index.html)" \
+            "" \
+            "Git dependency (preferred for sibling private repos):" \
+            "  mcdx_ql = { git = \"https://github.com/nilpferdschaefer/mcdx-ql\", rev = \"${GITHUB_SHA}\" }" \
+            > "${DEST}/USAGE.txt"
+
+          tar -C dist -czf "dist/mcdx_ql-${VERSION}-bundle.tar.gz" "mcdx_ql-${VERSION}"
+          echo "bundle=dist/mcdx_ql-${VERSION}-bundle.tar.gz" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      - name: Upload local artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx_ql-${{ steps.bundle.outputs.version }}-bundle
+          path: dist/mcdx_ql-${{ steps.bundle.outputs.version }}-bundle.tar.gz
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,82 @@
+name: Deploy docs (main)
+
+# Keeps Pages docs fresh on every main merge without a version tag.
+# Release tags still publish versioned crate+docs bundles via release.yml.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build rustdoc + crate bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          cargo package --no-verify
+          cargo doc --no-deps --document-private-items
+
+          DEST="dist/mcdx_ql-${VERSION}"
+          mkdir -p "${DEST}/docs"
+          cp "target/package/mcdx_ql-${VERSION}.crate" "${DEST}/"
+          cp -a target/doc/. "${DEST}/docs/"
+          tar -C dist -czf "dist/mcdx_ql-${VERSION}-bundle.tar.gz" "mcdx_ql-${VERSION}"
+
+          mkdir -p _site
+          cp -a target/doc/. _site/
+          cat > _site/index.html <<HTML
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=mcdx_ql/index.html">
+            <title>mcdx_ql docs</title>
+          </head>
+          <body><p><a href="mcdx_ql/index.html">mcdx_ql documentation</a></p></body>
+          </html>
+          HTML
+
+      - name: Upload local artifact (crate + docs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx_ql-${{ steps.bundle.outputs.version }}-bundle
+          path: dist/mcdx_ql-${{ steps.bundle.outputs.version }}-bundle.tar.gz
+          retention-days: 90
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

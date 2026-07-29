@@ -95,8 +95,58 @@ err.to_error_json()
 // { "code": "parse_error"|"sem_error"|"compile_error", "message": "...", "expr": "...", "pos": 4 }
 ```
 
+## Using from other `nilpferdschaefer` repos
+
+This crate is **not** published to crates.io. Sibling private repos should depend via git (CI publishes versioned bundles + rustdoc).
+
+### Prefer: git dependency
+
+```toml
+[dependencies]
+mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", tag = "v0.1.0" }
+# or track main:
+# mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", branch = "main" }
+```
+
+Private git deps need a credential with read access (SSH deploy key, `GITHUB_TOKEN` / `GH_TOKEN` with `contents: read`, or `CARGO_NET_GIT_FETCH_WITH_CLI=true` + `gh` auth).
+
+### Local artifact (crate + rustdoc)
+
+Every CI run on `main` / PRs and every `v*.*.*` tag uploads
+`mcdx_ql-<version>-bundle.tar.gz` containing:
+
+| Path | Contents |
+|------|----------|
+| `mcdx_ql-<version>.crate` | `cargo package` output |
+| `docs/` | rustdoc HTML — open `docs/mcdx_ql/index.html` |
+
+```bash
+# from a workflow artifact or GitHub Release asset
+tar xzf mcdx_ql-0.1.0-bundle.tar.gz
+open mcdx_ql-0.1.0/docs/mcdx_ql/index.html
+
+# optional path dependency after unpacking the .crate
+cargo unpack mcdx_ql-0.1.0/mcdx_ql-0.1.0.crate --output vendor
+# Cargo.toml: mcdx_ql = { path = "vendor/mcdx_ql-0.1.0" }
+```
+
+### Docs site
+
+On push to `main` and on version tags, rustdoc is deployed to GitHub Pages:
+
+https://nilpferdschaefer.github.io/mcdx-ql/
+
+Enable once under **Settings → Pages → Build and deployment → GitHub Actions** (private Pages requires an eligible GitHub plan).
+
+### Cutting a release
+
+1. Bump `version` in `Cargo.toml`
+2. Tag `vX.Y.Z` matching that version and push the tag
+3. `Release` workflow attaches the bundle + `.crate` to the GitHub Release and refreshes Pages
+
 ## Develop
 
 ```bash
 cargo test
+cargo doc --open --no-deps
 ```
