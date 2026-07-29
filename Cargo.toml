@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/nilpferdschaefer/mcdx-ql"
 documentation = "https://nilpferdschaefer.github.io/mcdx-ql/mcdx_ql/"
 keywords = ["sql", "grammar", "indicators", "mcdx"]
-categories = ["parser-implementations", "compilers"]
+categories = ["parser-implementations", "parsing"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
