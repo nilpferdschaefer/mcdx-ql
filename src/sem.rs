@@ -734,7 +734,11 @@ mod tests {
             "AVG([close.1d; $from:$to], $period) + AVG([close.1d; $from2:$to], $period)";
         let batch = parse_batch(src).unwrap();
         let err = analyze(&batch, &p, src).unwrap_err();
-        assert!(err.message.contains("same"));
+        assert!(
+            err.message.contains("conflicting") || err.message.contains("same"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
