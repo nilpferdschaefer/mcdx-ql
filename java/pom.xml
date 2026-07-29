@@ -86,4 +86,43 @@
       </plugin>
     </plugins>
   </build>
+
+  <!-- CI publish: mvn … -Dcrate.file=/path/to/mcdx_ql-X.Y.Z.crate -->
+  <profiles>
+    <profile>
+      <id>attach-crate</id>
+      <activation>
+        <property>
+          <name>crate.file</name>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>3.6.0</version>
+            <executions>
+              <execution>
+                <id>attach-rust-crate</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>attach-artifact</goal>
+                </goals>
+                <configuration>
+                  <artifacts>
+                    <artifact>
+                      <file>${crate.file}</file>
+                      <type>crate</type>
+                      <classifier>crate</classifier>
+                    </artifact>
+                  </artifacts>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

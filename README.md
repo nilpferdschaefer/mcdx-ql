@@ -136,11 +136,17 @@ err.to_error_json()
 
 This crate is **not** published to crates.io (GitHub Packages has no Cargo registry). Sibling repos should depend via **git** (Rust) or **GitHub Packages Maven** (Java). CI also uploads workflow/release bundles and rustdoc/Javadoc to Pages.
 
-### GitHub Packages (Java Maven)
+### GitHub Packages (Maven — JAR + crate together)
 
-[Publish GitHub Packages](.github/workflows/publish-packages.yml) deploys `com.nilpferdschaefer:mcdx-ql` (JAR + javadoc JAR) to:
+[Publish GitHub Packages](.github/workflows/publish-packages.yml) deploys one Maven package `com.nilpferdschaefer:mcdx-ql` containing:
 
-`https://maven.pkg.github.com/nilpferdschaefer/mcdx-ql`
+| Artifact | Classifier | Contents |
+|----------|------------|----------|
+| `mcdx-ql-<ver>.jar` | (default) | Java bindings + JNI |
+| `mcdx-ql-<ver>-javadoc.jar` | `javadoc` | Javadoc |
+| `mcdx-ql-<ver>-crate.crate` | `crate` | Rust `cargo package` output |
+
+Registry: `https://maven.pkg.github.com/nilpferdschaefer/mcdx-ql`
 
 | Trigger | Published version | Overwrite? |
 |---------|-------------------|------------|
@@ -167,6 +173,8 @@ This crate is **not** published to crates.io (GitHub Packages has no Cargo regis
 Authenticate with a PAT (or `GITHUB_TOKEN` in Actions) that has `read:packages` — put it in `~/.m2/settings.xml` under server id `github` (username = your GitHub login).
 
 Package UI: https://github.com/nilpferdschaefer/mcdx-ql/packages
+
+GitHub Packages is **not** a Cargo registry. For Cargo builds use a git dependency; grab the attached `-crate.crate` from Packages only if you want to vendor/download the packed crate next to the JAR.
 
 ### Rust: git dependency
 

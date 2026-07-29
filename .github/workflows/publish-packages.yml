@@ -1,10 +1,15 @@
 name: Publish GitHub Packages
 
-# Publishes the Java JAR (+ javadoc jar) to GitHub Packages (Maven).
+# Publishes to GitHub Packages (Maven registry), one package containing:
+#   - mcdx-ql-<ver>.jar           (Java + JNI)
+#   - mcdx-ql-<ver>-javadoc.jar
+#   - mcdx-ql-<ver>-crate.crate   (Rust cargo package, classifier "crate")
+#
 # Dev (main / workflow_dispatch): VERSION-SNAPSHOT (overwriteable).
 # Release tags vX.Y.Z: immutable X.Y.Z.
 #
-# Rust is not hosted on GitHub Packages — consumers use a git dependency.
+# Note: this is not a Cargo registry — use a git dependency for Cargo builds;
+# the attached .crate is for download/vendoring from the same Packages entry.
 # Javadoc HTML continues to ship via GitHub Pages (/javadoc/).
 
 on:
@@ -26,7 +31,7 @@ env:
 
 jobs:
   publish:
-    name: build + deploy Maven package
+    name: build + deploy Maven package (JAR + crate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,14 +81,16 @@ jobs:
           echo "base=${BASE}" >> "$GITHUB_OUTPUT"
           echo "version=${PUBLISH_VERSION}" >> "$GITHUB_OUTPUT"
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
-          echo "Publishing Java package as ${PUBLISH_VERSION} (${MODE})"
+          echo "crate=${GITHUB_WORKSPACE}/target/package/mcdx_ql-${BASE}.crate" >> "$GITHUB_OUTPUT"
+          echo "Publishing as ${PUBLISH_VERSION} (${MODE})"
 
-      - name: Build JAR + Javadoc
+      - name: Build JAR + Javadoc + crate
         run: |
           set -euo pipefail
           chmod +x scripts/*.sh
-          # build-jar.sh syncs pom to Cargo.toml base version; we re-stamp below.
           ./scripts/build-jar.sh
+          cargo package --no-verify --allow-dirty
+          test -f "target/package/mcdx_ql-${{ steps.ver.outputs.base }}.crate"
 
       - name: Stamp pom for deploy
         run: |
@@ -117,13 +124,15 @@ jobs:
           print(f"pom version={version} repo={repo}")
           PY
 
-      - name: Deploy to GitHub Packages
+      - name: Deploy JAR + javadoc + crate to GitHub Packages
         working-directory: java
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mvn -B -DskipTests deploy -s "${GITHUB_WORKSPACE}/settings.xml"
+          mvn -B -DskipTests deploy \
+            -s "${GITHUB_WORKSPACE}/settings.xml" \
+            "-Dcrate.file=${{ steps.ver.outputs.crate }}"
 
       - name: Summary
         run: |
@@ -133,10 +142,14 @@ jobs:
             echo "## GitHub Packages (Maven)"
             echo ""
             echo "- Package: \`com.nilpferdschaefer:mcdx-ql:${VERSION}\`"
+            echo "- Artifacts:"
+            echo "  - \`mcdx-ql-${VERSION}.jar\` (Java)"
+            echo "  - \`mcdx-ql-${VERSION}-javadoc.jar\`"
+            echo "  - \`mcdx-ql-${VERSION}-crate.crate\` (Rust \`cargo package\`)"
             echo "- Mode: \`${MODE}\` (SNAPSHOT = overwriteable in dev)"
             echo "- Registry: \`https://maven.pkg.github.com/${GITHUB_REPOSITORY}\`"
             echo "- UI: ${{ github.server_url }}/${{ github.repository }}/packages"
-            echo "- Javadoc HTML: https://nilpferdschaefer.github.io/mcdx-ql/javadoc/"
             echo ""
-            echo "Rust crates are **not** published here — use a git dependency on \`main\` / a tag."
+            echo "Cargo dependency resolution still uses **git** (Packages is not a Cargo registry)."
+            echo "Download the attached \`.crate\` from the package UI / Maven API for vendoring."
           } >> "$GITHUB_STEP_SUMMARY"
