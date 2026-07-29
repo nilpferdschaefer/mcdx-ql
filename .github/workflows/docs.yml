@@ -1,7 +1,7 @@
 name: Deploy docs (main)
 
 # Keeps Pages docs fresh on every main merge without a version tag.
-# Release tags still publish versioned crate+docs bundles via release.yml.
+# Also refreshes the crate+docs+JAR bundle artifact.
 
 on:
   push:
@@ -26,24 +26,30 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build rustdoc + crate bundle
+      - name: Cache Maven
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('java/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Build rustdoc + crate + JAR bundle
         id: bundle
         run: |
           set -euo pipefail
+          chmod +x scripts/*.sh
+          ./scripts/package-bundle.sh
           VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-          cargo package --no-verify
-          cargo doc --no-deps --document-private-items
-
-          DEST="dist/mcdx_ql-${VERSION}"
-          mkdir -p "${DEST}/docs"
-          cp "target/package/mcdx_ql-${VERSION}.crate" "${DEST}/"
-          cp -a target/doc/. "${DEST}/docs/"
-          tar -C dist -czf "dist/mcdx_ql-${VERSION}-bundle.tar.gz" "mcdx_ql-${VERSION}"
 
           mkdir -p _site
           cp -a target/doc/. _site/
@@ -59,11 +65,18 @@ jobs:
           </html>
           HTML
 
-      - name: Upload local artifact (crate + docs)
+      - name: Upload local artifact (crate + docs + JAR)
         uses: actions/upload-artifact@v4
         with:
           name: mcdx_ql-${{ steps.bundle.outputs.version }}-bundle
           path: dist/mcdx_ql-${{ steps.bundle.outputs.version }}-bundle.tar.gz
+          retention-days: 90
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx-ql-${{ steps.bundle.outputs.version }}-jar
+          path: java/target/mcdx-ql-${{ steps.bundle.outputs.version }}.jar
           retention-days: 90
 
       - name: Upload Pages artifact

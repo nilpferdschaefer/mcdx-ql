@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BindValueJson","CompileResponseJson","DomainJson","ParamValueJson"],"fn":["compile_json","default_after_ts","default_limit"],"struct":["CompileRequestJson","CompiledQueryJson","ErrorJson","ScaffoldsJson"]};

@@ -101,9 +101,9 @@ err.to_error_json()
 
 ## Using from other `nilpferdschaefer` repos
 
-This crate is **not** published to crates.io. Sibling private repos should depend via git (CI publishes versioned bundles + rustdoc).
+This crate is **not** published to crates.io. Sibling private repos should depend via git (Rust) or the shipped JAR (Java). CI publishes versioned bundles + rustdoc + JAR.
 
-### Prefer: git dependency
+### Rust: git dependency
 
 ```toml
 [dependencies]
@@ -114,7 +114,31 @@ mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", tag = "v0.1.0" 
 
 Private git deps need a credential with read access (SSH deploy key, `GITHUB_TOKEN` / `GH_TOKEN` with `contents: read`, or `CARGO_NET_GIT_FETCH_WITH_CLI=true` + `gh` auth).
 
-### Local artifact (crate + rustdoc)
+### Java: JAR (JNI)
+
+```java
+import com.nilpferdschaefer.mcdxql.McdxQl;
+
+String response = McdxQl.compile("""
+  {
+    "expr": "AVG([close.1d; $from:$to], $period)",
+    "assets": ["BTC", "ETH"],
+    "params": {"period": 14, "from": 1700000000000, "to": 1700086400000}
+  }
+  """);
+// {"ok":true,"sql":"WITH params AS ...", "binds":[...], ...}
+```
+
+Build locally (needs JDK 21 + Maven):
+
+```bash
+./scripts/build-jar.sh
+# → java/target/mcdx-ql-0.1.0.jar  (embeds native/linux-x86_64/libmcdx_ql.so on Linux CI/dev)
+```
+
+CI also uploads `mcdx-ql-<version>.jar` as a standalone workflow/release asset. The JAR currently embeds the **linux-x86_64** native library from the Ubuntu builder; other platforms can run `./scripts/build-jar.sh` on that host and consume the produced JAR.
+
+### Local artifact bundle
 
 Every CI run on `main` / PRs and every `v*.*.*` tag uploads
 `mcdx_ql-<version>-bundle.tar.gz` containing:
@@ -123,15 +147,14 @@ Every CI run on `main` / PRs and every `v*.*.*` tag uploads
 |------|----------|
 | `mcdx_ql-<version>.crate` | `cargo package` output |
 | `docs/` | rustdoc HTML — open `docs/mcdx_ql/index.html` |
+| `java/mcdx-ql-<version>.jar` | Java bindings + embedded JNI lib |
+| `java/native/` | raw native libs |
 
 ```bash
 # from a workflow artifact or GitHub Release asset
 tar xzf mcdx_ql-0.1.0-bundle.tar.gz
 open mcdx_ql-0.1.0/docs/mcdx_ql/index.html
-
-# optional path dependency after unpacking the .crate
-cargo unpack mcdx_ql-0.1.0/mcdx_ql-0.1.0.crate --output vendor
-# Cargo.toml: mcdx_ql = { path = "vendor/mcdx_ql-0.1.0" }
+java -cp mcdx_ql-0.1.0/java/mcdx-ql-0.1.0.jar com.nilpferdschaefer.mcdxql.SmokeTest
 ```
 
 ### Docs site
@@ -152,5 +175,8 @@ Enable once under **Settings → Pages → Build and deployment → GitHub Actio
 
 ```bash
 cargo test
+cargo test --features jni
 cargo doc --open --no-deps
+./scripts/build-jar.sh          # JAR + smoke test
+./scripts/package-bundle.sh     # dist/mcdx_ql-*-bundle.tar.gz
 ```

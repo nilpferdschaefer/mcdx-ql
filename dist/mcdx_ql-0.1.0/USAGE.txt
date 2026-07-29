@@ -1,0 +1,16 @@
+mcdx_ql 0.1.0
+
+Contents:
+  mcdx_ql-0.1.0.crate     — Rust cargo package
+  docs/                        — rustdoc HTML (docs/mcdx_ql/index.html)
+  java/mcdx-ql-0.1.0.jar  — Java bindings (JNI; native lib embedded)
+  java/native/                 — raw native libs (optional)
+
+Rust (sibling private repos):
+  mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", tag = "v0.1.0" }
+
+Java:
+  // Maven: install the JAR into a private repo, or path-depend in CI
+  java -cp java/mcdx-ql-0.1.0.jar com.nilpferdschaefer.mcdxql.SmokeTest
+
+  String json = McdxQl.compile("{\"expr\":\"AVG([close.1d], 14)\",\"assets\":[\"BTC\"],\"params\":{\"period\":14}}");

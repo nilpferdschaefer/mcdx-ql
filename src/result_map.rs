@@ -5,7 +5,7 @@
 
 use serde_json::{Map, Value};
 
-/// SQL column names produced by [`crate::compile`].
+/// SQL column names produced by [`crate::compile()`].
 pub mod sql_columns {
     pub const COIN: &str = "coin";
     pub const INDICATOR: &str = "indicator";

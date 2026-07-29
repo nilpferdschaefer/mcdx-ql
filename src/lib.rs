@@ -8,15 +8,21 @@
 //! - `[close.1d; $from:$to]` — daily closes over an absolute ms range
 //! - `[close.1h]` — hourly closes at the latest available bar
 //! - `[close.1d@$benchmark]` — qualified asset, latest bar
+//!
+//! Java consumers: enable `--features jni`, build the JAR under `java/` (see README).
 
 mod ast;
 mod compile;
 mod error;
 mod interval;
+mod json_api;
 mod lex;
 mod parse;
 mod result_map;
 mod sem;
+
+#[cfg(feature = "jni")]
+mod jni_bridge;
 
 pub use ast::{
     AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series, SeriesDomain,
@@ -26,6 +32,10 @@ pub use compile::{
 };
 pub use error::{Error, ErrorCode};
 pub use interval::{interval_ms, IntervalError};
+pub use json_api::{
+    compile_json, BindValueJson, CompileRequestJson, CompileResponseJson, CompiledQueryJson,
+    DomainJson, ErrorJson, ParamValueJson, ScaffoldsJson,
+};
 pub use lex::tokenize;
 pub use parse::{parse_batch, parse_expr};
 pub use result_map::{

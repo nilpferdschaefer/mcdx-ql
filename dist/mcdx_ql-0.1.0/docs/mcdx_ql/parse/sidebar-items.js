@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["op_takes_window","parse_batch","parse_expr"],"struct":["Parser"]};
