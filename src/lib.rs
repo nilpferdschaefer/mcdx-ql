@@ -25,7 +25,8 @@ mod sem;
 mod jni_bridge;
 
 pub use ast::{
-    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series, SeriesDomain,
+    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, EmitCount, EmitEnd, Expr, LookbackBound, Series,
+    SeriesDomain,
 };
 pub use compile::{
     compile, compile_batch, compile_expr, BindValue, CompiledQuery, CompileRequest, Scaffolds,

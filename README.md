@@ -34,21 +34,40 @@ let q = compile(&CompileRequest {
 | Form | Example |
 |------|---------|
 | Series + bucket | `[close.1d]`, `[close.1h]`, `[close.5m]` |
-| Series + bucket + domain | `[close.1d; $from:$to]` |
-| Latest (no domain) | `[close.1d]` → emit the latest available bar |
-| Series @ asset | `[close.1d@TOTALCRYPTOMARKETCAP; $from:$to]`, `[close.1d@$benchmark]` |
-| Trailing window sugar | `AVG([close.1d; $from:$to], $period)` ≡ `AVG(…, t-($period-1), t)` |
+| Absolute emit range | `[close.1d; $from:$to]` → one row per bar in range |
+| Trailing N bars to date | `[close.1d; 100@$end]` → 100 bars ending at `$end` (inclusive) |
+| Trailing N bars to latest | `[close.1d; 100@latest]` / `[close.1d; $n@latest]` |
+| Latest only (no domain) | `[close.1d]` → single latest bar |
+| Series @ asset | `[close.1d@ETH; 100@$end]`, `[close.1d@$benchmark]` |
+| Trailing window sugar | `AVG([close.1d; 100@$end], $period)` ≡ `AVG(…, t-($period-1), t)` |
 | Lookback | `t`, `t0`, `t-INT`, `t-($period-1)` |
-| Batch | `{ sma_14: AVG([close.1d], 14), ema_14: EMA([close.1d], 14) }` |
+| Batch | `{ sma_14: AVG([close.1d; 100@latest], 14), … }` |
+
+**Emit domain vs lookback**
+
+- **Emit domain** (`$from:$to`, `N@$end`, `N@latest`, or omitted) chooses which bars appear in the result — backpopulate a whole range in **one** query.
+- **Lookback** (`$period` / `t-(N-1), t`) is the window used **at each emit bar** (e.g. 31 for beta).
+
+Example — correlation of BTC vs ETH for 100 daily bars ending 15 May 2026:
+
+```text
+REGR_SLOPE(
+  RET([close.1d; 100@$end]),
+  RET([close.1d@ETH; 100@$end]),
+  $period
+)
+```
+
+with `assets=["BTC"]`, `params.end` = bar-open ms for 2026-05-15, `params.period=31`. Returns up to 100 rows (then `limit` / `after_ts`).
 
 **Rules**
 
 - Bucket (`.1d` / `.1h` / …) is **required** on every series; all buckets in one expr must match.
-- Domain `; $from:$to` is optional; omit it to evaluate the latest available `timestamp_start`.
-- When present, all absolute domains must resolve to the same `[$from,$to]`; cannot mix latest + absolute.
+- Domain is optional; omit it for the single latest bar. Prefer `N@$end` / `N@latest` for backfills instead of hand-computing `$from`.
+- All series domains in one expr must resolve to the same emit range.
 - Bare series names / bare identifiers are illegal — series need `[]`, params need `$`.
 - `$name` values come only from request `params` (missing → fail loud).
-- Request-level `dirty_from` / `dirty_to` and conflicting `reporting_period` are rejected (grammar owns domain + bucket).
+- Request-level `dirty_from` / `dirty_to` and conflicting `reporting_period` are rejected.
 - `t` / `t0` are illegal inside the domain slot.
 
 ### Builtins

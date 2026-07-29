@@ -63,15 +63,36 @@ pub struct Series {
     /// Bar bucket / reporting period suffix, e.g. `1d`, `1h`, `5m`.
     pub bucket: String,
     pub asset: AssetRef,
-    /// Absolute emit domain `$from:$to`. `None` → latest available bar.
+    /// Emit domain. `None` → single latest bar.
     pub domain: Option<SeriesDomain>,
     pub pos: usize,
 }
 
+/// Emit domain on a series literal (after `;`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeriesDomain {
-    pub from: DomainBound,
-    pub to: DomainBound,
+pub enum SeriesDomain {
+    /// Absolute `$from:$to` (inclusive `timestamp_start` ms).
+    Absolute { from: DomainBound, to: DomainBound },
+    /// Trailing emit window: `100@$end` / `$n@latest` — N bars ending at `end`.
+    TrailingBars {
+        count: EmitCount,
+        end: EmitEnd,
+        pos: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmitCount {
+    Int { value: i64, pos: usize },
+    Param { name: String, pos: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmitEnd {
+    /// `$end` — absolute inclusive end `timestamp_start` ms.
+    Param { name: String, pos: usize },
+    /// Keyword `latest` — end at max available bar.
+    Latest { pos: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

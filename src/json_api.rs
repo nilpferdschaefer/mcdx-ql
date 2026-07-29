@@ -93,6 +93,7 @@ pub enum DomainJson {
         to_ms: i64,
     },
     Latest,
+    TrailingLatest { bars: i32 },
 }
 
 impl From<&Domain> for DomainJson {
@@ -110,6 +111,7 @@ impl From<&Domain> for DomainJson {
                 to_ms: *to_ms,
             },
             Domain::Latest => DomainJson::Latest,
+            Domain::TrailingLatest { bars } => DomainJson::TrailingLatest { bars: *bars },
         }
     }
 }

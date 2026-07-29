@@ -3,9 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{
-    AssetRef, BatchExpr, CallOp, Expr, LookbackBound, Series, TrailingPeriod, WindowSpec,
+    AssetRef, BatchExpr, CallOp, EmitCount, EmitEnd, Expr, LookbackBound, Series, SeriesDomain,
+    TrailingPeriod, WindowSpec,
 };
 use crate::error::Error;
+use crate::interval::interval_ms;
 
 /// Bound parameter values from the request `params` object.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +56,8 @@ pub enum Domain {
     },
     /// Domain omitted — evaluate the latest available bar only.
     Latest,
+    /// `N@latest` / `$n@latest` — emit N bars ending at max available `timestamp_start`.
+    TrailingLatest { bars: i32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,30 +122,40 @@ pub fn analyze(
     })?;
 
     let domain = ctx.domain.unwrap_or(Domain::Latest);
-    if let Domain::Absolute {
-        from_param,
-        to_param,
-        from_ms,
-        to_ms,
-    } = &domain
-    {
-        if from_ms > to_ms {
-            return Err(Error::sem(
-                format!(
-                    "domain requires ${from_param} <= ${to_param} (got {from_ms} > {to_ms})"
-                ),
-                expr_src,
-                None,
-            ));
+    match &domain {
+        Domain::Absolute {
+            from_param,
+            to_param,
+            from_ms,
+            to_ms,
+        } => {
+            if from_ms > to_ms {
+                return Err(Error::sem(
+                    format!(
+                        "domain requires ${from_param} <= ${to_param} (got {from_ms} > {to_ms})"
+                    ),
+                    expr_src,
+                    None,
+                ));
+            }
         }
+        Domain::TrailingLatest { bars } => {
+            if *bars < 1 {
+                return Err(Error::sem(
+                    format!("trailing emit bar count must be >= 1, got {bars}"),
+                    expr_src,
+                    None,
+                ));
+            }
+        }
+        Domain::Latest => {}
     }
 
     // Reject request-level dirty_from/dirty_to if present as params names used wrongly —
-    // callers should not pass them; domain comes from grammar. Soft check: if both dirty_*
-    // exist as params but are not referenced, still fail loud per spec.
+    // callers should not pass them; domain comes from grammar.
     if params.contains_key("dirty_from") || params.contains_key("dirty_to") {
         return Err(Error::sem(
-            "request-level dirty_from/dirty_to are rejected; express domain as series `$from:$to` or omit for latest",
+            "request-level dirty_from/dirty_to are rejected; use `$from:$to`, `N@$end`, or `N@latest` in the grammar",
             expr_src,
             None,
         ));
@@ -275,74 +289,139 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
 
-        match &s.domain {
-            None => {
-                // Latest mode. Mixing absolute + latest in one expr is loud-fail.
-                match &self.domain {
-                    None => self.domain = Some(Domain::Latest),
-                    Some(Domain::Latest) => {}
-                    Some(Domain::Absolute { .. }) => {
-                        return Err(Error::sem(
-                            "cannot mix absolute `$from:$to` domains with latest-only series in one expr",
-                            self.expr_src,
-                            Some(s.pos),
-                        ));
-                    }
-                }
-            }
-            Some(dom) => {
-                let from_v = self.require_param(&dom.from.name, Some(dom.from.pos))?;
-                let to_v = self.require_param(&dom.to.name, Some(dom.to.pos))?;
+        let resolved = match &s.domain {
+            None => Domain::Latest,
+            Some(SeriesDomain::Absolute { from, to }) => {
+                let from_v = self.require_param(&from.name, Some(from.pos))?;
+                let to_v = self.require_param(&to.name, Some(to.pos))?;
                 let from_ms = from_v.as_i64().ok_or_else(|| {
                     Error::sem(
-                        format!("domain param `${}` must be integer epoch-ms", dom.from.name),
+                        format!("domain param `${}` must be integer epoch-ms", from.name),
                         self.expr_src,
-                        Some(dom.from.pos),
+                        Some(from.pos),
                     )
                 })?;
                 let to_ms = to_v.as_i64().ok_or_else(|| {
                     Error::sem(
-                        format!("domain param `${}` must be integer epoch-ms", dom.to.name),
+                        format!("domain param `${}` must be integer epoch-ms", to.name),
                         self.expr_src,
-                        Some(dom.to.pos),
+                        Some(to.pos),
                     )
                 })?;
-
-                let domain = Domain::Absolute {
-                    from_param: dom.from.name.clone(),
-                    to_param: dom.to.name.clone(),
+                Domain::Absolute {
+                    from_param: from.name.clone(),
+                    to_param: to.name.clone(),
                     from_ms,
                     to_ms,
-                };
-
-                match &self.domain {
-                    None => self.domain = Some(domain),
-                    Some(Domain::Latest) => {
-                        return Err(Error::sem(
-                            "cannot mix absolute `$from:$to` domains with latest-only series in one expr",
-                            self.expr_src,
-                            Some(s.pos),
-                        ));
-                    }
-                    Some(Domain::Absolute {
-                        from_ms: ef,
-                        to_ms: et,
-                        ..
-                    }) => {
-                        if *ef != from_ms || *et != to_ms {
-                            return Err(Error::sem(
-                                format!(
-                                    "all series domains must resolve to the same [$from,$to]; got [{ef},{et}] vs [{from_ms},{to_ms}]"
-                                ),
+                }
+            }
+            Some(SeriesDomain::TrailingBars { count, end, pos }) => {
+                let bars = self.resolve_emit_count(count)?;
+                if bars < 1 {
+                    return Err(Error::sem(
+                        format!("trailing emit bar count must be >= 1, got {bars}"),
+                        self.expr_src,
+                        Some(*pos),
+                    ));
+                }
+                let interval = interval_ms(&s.bucket).map_err(|e| {
+                    Error::sem(format!("{e}"), self.expr_src, Some(s.pos))
+                })?;
+                match end {
+                    EmitEnd::Latest { .. } => Domain::TrailingLatest { bars },
+                    EmitEnd::Param { name, pos: epos } => {
+                        let end_v = self.require_param(name, Some(*epos))?;
+                        let to_ms = end_v.as_i64().ok_or_else(|| {
+                            Error::sem(
+                                format!("emit end param `${name}` must be integer epoch-ms"),
                                 self.expr_src,
-                                Some(s.pos),
-                            ));
+                                Some(*epos),
+                            )
+                        })?;
+                        let from_ms = to_ms
+                            .checked_sub((bars as i64 - 1).checked_mul(interval).ok_or_else(
+                                || Error::sem("emit range overflow", self.expr_src, Some(*pos)),
+                            )?)
+                            .ok_or_else(|| {
+                                Error::sem("emit range overflow", self.expr_src, Some(*pos))
+                            })?;
+                        Domain::Absolute {
+                            from_param: format!("{name}-({bars}-1)*interval"),
+                            to_param: name.clone(),
+                            from_ms,
+                            to_ms,
                         }
                     }
                 }
             }
-        }
+        };
+
+        self.unify_domain(resolved, s.pos)?;
         Ok(())
+    }
+
+    fn resolve_emit_count(&mut self, count: &EmitCount) -> Result<i32, Error> {
+        match count {
+            EmitCount::Int { value, pos } => {
+                if *value < 1 || *value > i32::MAX as i64 {
+                    return Err(Error::sem(
+                        format!("trailing emit bar count must be in 1..={}, got {value}", i32::MAX),
+                        self.expr_src,
+                        Some(*pos),
+                    ));
+                }
+                Ok(*value as i32)
+            }
+            EmitCount::Param { name, pos } => {
+                let v = self.require_param(name, Some(*pos))?;
+                let n = v.as_i64().ok_or_else(|| {
+                    Error::sem(
+                        format!("emit count param `${name}` must be integer"),
+                        self.expr_src,
+                        Some(*pos),
+                    )
+                })?;
+                if n < 1 || n > i32::MAX as i64 {
+                    return Err(Error::sem(
+                        format!("trailing emit bar count must be in 1..={}, got {n}", i32::MAX),
+                        self.expr_src,
+                        Some(*pos),
+                    ));
+                }
+                Ok(n as i32)
+            }
+        }
+    }
+
+    fn unify_domain(&mut self, domain: Domain, pos: usize) -> Result<(), Error> {
+        match (&self.domain, &domain) {
+            (None, d) => {
+                self.domain = Some(d.clone());
+                Ok(())
+            }
+            (Some(Domain::Latest), Domain::Latest) => Ok(()),
+            (
+                Some(Domain::Absolute {
+                    from_ms: ef,
+                    to_ms: et,
+                    ..
+                }),
+                Domain::Absolute {
+                    from_ms,
+                    to_ms,
+                    ..
+                },
+            ) if ef == from_ms && et == to_ms => Ok(()),
+            (
+                Some(Domain::TrailingLatest { bars: a }),
+                Domain::TrailingLatest { bars: b },
+            ) if a == b => Ok(()),
+            (Some(existing), new) => Err(Error::sem(
+                format!("conflicting series domains in one expr: {existing:?} vs {new:?}"),
+                self.expr_src,
+                Some(pos),
+            )),
+        }
     }
 
     fn walk_call(
@@ -634,7 +713,7 @@ mod tests {
                 assert_eq!(from_ms, 100);
                 assert_eq!(to_ms, 200);
             }
-            Domain::Latest => panic!("expected absolute"),
+            other => panic!("expected absolute, got {other:?}"),
         }
     }
 

@@ -147,19 +147,26 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         market_tickers: analysis.market_tickers.iter().cloned().collect(),
     };
 
+    let latest_emit_bars = match &analysis.domain {
+        Domain::Latest => 1,
+        Domain::TrailingLatest { bars } => *bars,
+        Domain::Absolute { .. } => 1, // unused when dirty_* binds are set
+    };
+
     let sql = render_envelope(
         &reporting_period,
         interval,
         &scaffolds,
         &named_windows,
         &value_cols,
+        latest_emit_bars,
     );
 
     let (dirty_from, dirty_to) = match &analysis.domain {
         Domain::Absolute { from_ms, to_ms, .. } => {
             (BindValue::BigInt(*from_ms), BindValue::BigInt(*to_ms))
         }
-        Domain::Latest => (BindValue::Null, BindValue::Null),
+        Domain::Latest | Domain::TrailingLatest { .. } => (BindValue::Null, BindValue::Null),
     };
 
     let binds = vec![
@@ -753,8 +760,10 @@ fn render_envelope(
     scaffolds: &Scaffolds,
     named_windows: &BTreeMap<String, i32>,
     value_cols: &[(String, String, String, String)],
+    latest_emit_bars: i32,
 ) -> String {
     let mut sql = String::new();
+    let trailing_offset = (latest_emit_bars as i64 - 1) * interval_ms;
 
     writeln!(
         sql,
@@ -772,12 +781,13 @@ fn render_envelope(
     )
     .unwrap();
 
-    // Absolute binds, or latest: COALESCE to MAX(timestamp_start) over coins.
+    // Absolute: dirty_* binds.
+    // Latest (1 bar) / TrailingLatest(N): dirty_* NULL → end at MAX(ts), start at end-(N-1)*interval.
     writeln!(
         sql,
         "bounds AS (\n\
          \x20 SELECT\n\
-         \x20   COALESCE(p.dirty_from, l.ts) AS emit_from,\n\
+         \x20   COALESCE(p.dirty_from, l.ts - {trailing_offset}) AS emit_from,\n\
          \x20   COALESCE(p.dirty_to, l.ts) AS emit_to\n\
          \x20 FROM params p\n\
          \x20 CROSS JOIN LATERAL (\n\

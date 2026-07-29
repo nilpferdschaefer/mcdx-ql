@@ -53,9 +53,46 @@ fn latest_domain_omitted() {
     assert_eq!(q.domain, Domain::Latest);
     assert_eq!(q.binds[1], BindValue::Null);
     assert_eq!(q.binds[2], BindValue::Null);
-    assert!(q.sql.contains("COALESCE(p.dirty_from, l.ts)"));
+    // N=1 → emit_from = latest - 0
+    assert!(q.sql.contains("COALESCE(p.dirty_from, l.ts - 0)"));
     assert!(q.sql.contains("b.emit_from"));
     assert!(q.sql.contains("b.emit_to"));
+}
+
+#[test]
+fn trailing_bars_ending_at_date() {
+    // 100 daily bars ending 2026-05-15 UTC (bar open ms)
+    let end = 1_778_803_200_000_i64;
+    let mut r = req(
+        "REGR_SLOPE(RET([close.1d; 100@$end]), RET([close.1d@$b; 100@$end]), $period)",
+    );
+    r.params.insert("end".into(), ParamValue::Int(end));
+    r.params.insert("b".into(), ParamValue::Text("ETH".into()));
+    r.params.insert("period".into(), ParamValue::Int(31));
+    let q = compile(&r).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::Absolute {
+            from_param: "end-(100-1)*interval".into(),
+            to_param: "end".into(),
+            from_ms: end - 99 * 86_400_000,
+            to_ms: end,
+        }
+    );
+    assert_eq!(q.binds[1], BindValue::BigInt(end - 99 * 86_400_000));
+    assert_eq!(q.binds[2], BindValue::BigInt(end));
+    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m.market_ret)"));
+    // One joint query emits the whole 100-bar range (paginated by limit).
+    assert_eq!(q.indicators, vec!["value".to_string()]);
+}
+
+#[test]
+fn trailing_bars_ending_latest() {
+    let q = compile(&req("AVG([close.1d; 100@latest], $period)")).unwrap();
+    assert_eq!(q.domain, Domain::TrailingLatest { bars: 100 });
+    assert_eq!(q.binds[1], BindValue::Null);
+    assert_eq!(q.binds[2], BindValue::Null);
+    assert!(q.sql.contains(&format!("l.ts - {}", 99_i64 * 86_400_000)));
 }
 
 #[test]

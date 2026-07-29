@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::ast::{
-    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series, SeriesDomain,
-    TrailingPeriod, WindowSpec,
+    AssetRef, BatchExpr, BinOp, CallOp, DomainBound, EmitCount, EmitEnd, Expr, LookbackBound, Series,
+    SeriesDomain, TrailingPeriod, WindowSpec,
 };
 use crate::interval::interval_ms;
 use crate::error::Error;
@@ -291,16 +291,14 @@ impl<'a> Parser<'a> {
             AssetRef::Row
         };
 
-        // Optional absolute domain `; $from:$to`. Omitted → latest available bar.
+        // Optional domain after `;`:
+        //   `$from:$to`     absolute emit range
+        //   `100@$end`      N bars ending at `$end`
+        //   `$n@latest`     N bars ending at latest available
+        // Omitted → single latest bar.
         let domain = if matches!(self.peek().kind, TokenKind::Semi) {
             self.advance(); // ;
-            let from = self.parse_domain_bound()?;
-            if !matches!(self.peek().kind, TokenKind::Colon) {
-                return Err(self.err("expected `:` between domain bounds", Some(self.peek().pos)));
-            }
-            self.advance();
-            let to = self.parse_domain_bound()?;
-            Some(SeriesDomain { from, to })
+            Some(self.parse_series_domain()?)
         } else {
             None
         };
@@ -355,6 +353,111 @@ impl<'a> Parser<'a> {
             )
         })?;
         Ok(bucket)
+    }
+
+    fn parse_series_domain(&mut self) -> Result<SeriesDomain, Error> {
+        let pos = self.peek().pos;
+        match &self.peek().kind {
+            TokenKind::Int(n) => {
+                let value = *n;
+                self.advance();
+                if !matches!(self.peek().kind, TokenKind::At) {
+                    return Err(self.err(
+                        "expected `@` in trailing domain `N@$end` / `N@latest`",
+                        Some(self.peek().pos),
+                    ));
+                }
+                self.advance();
+                let end = self.parse_emit_end()?;
+                Ok(SeriesDomain::TrailingBars {
+                    count: EmitCount::Int { value, pos },
+                    end,
+                    pos,
+                })
+            }
+            TokenKind::Dollar => {
+                self.advance();
+                let name_tok = self.advance();
+                let name = match name_tok.kind {
+                    TokenKind::Ident(s) => s,
+                    _ => {
+                        return Err(self.err(
+                            "expected name after `$` in domain",
+                            Some(name_tok.pos),
+                        ))
+                    }
+                };
+                if name == "t" || name == "t0" {
+                    return Err(self.err(
+                        "`t`/`t0` are illegal inside the domain slot",
+                        Some(name_tok.pos),
+                    ));
+                }
+                match &self.peek().kind {
+                    TokenKind::Colon => {
+                        self.advance();
+                        let to = self.parse_domain_bound()?;
+                        Ok(SeriesDomain::Absolute {
+                            from: DomainBound {
+                                name,
+                                pos: name_tok.pos,
+                            },
+                            to,
+                        })
+                    }
+                    TokenKind::At => {
+                        self.advance();
+                        let end = self.parse_emit_end()?;
+                        Ok(SeriesDomain::TrailingBars {
+                            count: EmitCount::Param {
+                                name,
+                                pos: name_tok.pos,
+                            },
+                            end,
+                            pos,
+                        })
+                    }
+                    _ => Err(self.err(
+                        "expected `:$to` (absolute) or `@$end`/`@latest` (trailing N bars)",
+                        Some(self.peek().pos),
+                    )),
+                }
+            }
+            _ => Err(self.err(
+                "expected domain `$from:$to` or trailing `N@$end` / `$n@latest`",
+                Some(pos),
+            )),
+        }
+    }
+
+    fn parse_emit_end(&mut self) -> Result<EmitEnd, Error> {
+        let pos = self.peek().pos;
+        match &self.peek().kind {
+            TokenKind::Dollar => {
+                self.advance();
+                let name_tok = self.advance();
+                match name_tok.kind {
+                    TokenKind::Ident(name) => {
+                        if name == "t" || name == "t0" || name == "latest" {
+                            return Err(self.err(
+                                "emit end must be `$name` (epoch-ms) or the keyword `latest`",
+                                Some(name_tok.pos),
+                            ));
+                        }
+                        Ok(EmitEnd::Param { name, pos })
+                    }
+                    _ => Err(self.err("expected param name after `$`", Some(name_tok.pos))),
+                }
+            }
+            TokenKind::Ident(s) if s == "latest" => {
+                self.advance();
+                Ok(EmitEnd::Latest { pos })
+            }
+            _ => Err(self.err(
+                "expected `$end` or `latest` after `@` in trailing domain",
+                Some(pos),
+            )),
+        }
     }
 
     fn parse_domain_bound(&mut self) -> Result<DomainBound, Error> {
@@ -567,7 +670,7 @@ mod tests {
             } => match &args[0] {
                 Expr::Series(s) => {
                     assert_eq!(s.bucket, "1d");
-                    assert!(s.domain.is_some());
+                    assert!(matches!(s.domain, Some(SeriesDomain::Absolute { .. })));
                 }
                 other => panic!("{other:?}"),
             },
@@ -583,6 +686,46 @@ mod tests {
                 Expr::Series(s) => {
                     assert_eq!(s.bucket, "1h");
                     assert!(s.domain.is_none());
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_trailing_bars_ending_at_param() {
+        let e = parse_expr("AVG([close.1d; 100@$end], 14)").unwrap();
+        match e {
+            Expr::Call { args, .. } => match &args[0] {
+                Expr::Series(s) => match &s.domain {
+                    Some(SeriesDomain::TrailingBars {
+                        count: EmitCount::Int { value: 100, .. },
+                        end: EmitEnd::Param { name, .. },
+                        ..
+                    }) => assert_eq!(name, "end"),
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_trailing_bars_ending_latest() {
+        let e = parse_expr("AVG([close.1d; $n@latest], $period)").unwrap();
+        match e {
+            Expr::Call { args, .. } => match &args[0] {
+                Expr::Series(s) => {
+                    assert!(matches!(
+                        s.domain,
+                        Some(SeriesDomain::TrailingBars {
+                            count: EmitCount::Param { .. },
+                            end: EmitEnd::Latest { .. },
+                            ..
+                        })
+                    ));
                 }
                 other => panic!("{other:?}"),
             },
