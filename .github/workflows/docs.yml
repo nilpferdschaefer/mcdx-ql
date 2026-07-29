@@ -51,17 +51,27 @@ jobs:
           VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          mkdir -p _site
+          mkdir -p _site/javadoc
           cp -a target/doc/. _site/
+          JAVADOC_HTML="java/target/reports/apidocs"
+          if [[ ! -f "${JAVADOC_HTML}/index.html" && -f java/target/apidocs/index.html ]]; then
+            JAVADOC_HTML="java/target/apidocs"
+          fi
+          cp -a "${JAVADOC_HTML}/." _site/javadoc/
           cat > _site/index.html <<HTML
           <!DOCTYPE html>
           <html lang="en">
           <head>
             <meta charset="utf-8">
-            <meta http-equiv="refresh" content="0; url=mcdx_ql/index.html">
             <title>mcdx_ql docs</title>
           </head>
-          <body><p><a href="mcdx_ql/index.html">mcdx_ql documentation</a></p></body>
+          <body>
+            <h1>mcdx-ql documentation</h1>
+            <ul>
+              <li><a href="mcdx_ql/index.html">Rust (rustdoc)</a></li>
+              <li><a href="javadoc/index.html">Java (Javadoc)</a></li>
+            </ul>
+          </body>
           </html>
           HTML
 
@@ -76,7 +86,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mcdx-ql-${{ steps.bundle.outputs.version }}-jar
-          path: java/target/mcdx-ql-${{ steps.bundle.outputs.version }}.jar
+          path: |
+            java/target/mcdx-ql-${{ steps.bundle.outputs.version }}.jar
+            java/target/mcdx-ql-${{ steps.bundle.outputs.version }}-javadoc.jar
           retention-days: 90
 
       - name: Upload Pages artifact

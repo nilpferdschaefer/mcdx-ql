@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Populate a binary-repo tree with:
-#   maven/  — Maven2 layout for the Java JAR (+ pom + checksums + metadata)
-#   crates/ — cargo package (.crate) + sha256
-#   bundles/— full dist bundle tarball
+#   maven/   — Maven2 layout for the Java JAR (+ javadoc jar + pom + checksums)
+#   crates/  — cargo package (.crate) + sha256
+#   bundles/ — full dist bundle tarball
+#   javadoc/ — Javadoc HTML site
 #
 # Usage:
 #   ./scripts/package-bundle.sh          # build artifacts first
@@ -27,20 +28,30 @@ CRATE_NAME="mcdx_ql"
 
 CRATE_SRC="target/package/${CRATE_NAME}-${VERSION}.crate"
 JAR_SRC="java/target/${ARTIFACT}-${VERSION}.jar"
+JAVADOC_JAR_SRC="java/target/${ARTIFACT}-${VERSION}-javadoc.jar"
 BUNDLE_SRC="dist/${CRATE_NAME}-${VERSION}-bundle.tar.gz"
 POM_SRC="java/pom.xml"
+JAVADOC_HTML_SRC="java/target/reports/apidocs"
+if [[ ! -f "${JAVADOC_HTML_SRC}/index.html" && -f java/target/apidocs/index.html ]]; then
+  JAVADOC_HTML_SRC="java/target/apidocs"
+fi
 
-for f in "${CRATE_SRC}" "${JAR_SRC}" "${BUNDLE_SRC}" "${POM_SRC}"; do
+for f in "${CRATE_SRC}" "${JAR_SRC}" "${JAVADOC_JAR_SRC}" "${BUNDLE_SRC}" "${POM_SRC}"; do
   if [[ ! -f "${f}" ]]; then
     echo "missing artifact: ${f} (run ./scripts/package-bundle.sh first)" >&2
     exit 1
   fi
 done
+if [[ ! -f "${JAVADOC_HTML_SRC}/index.html" ]]; then
+  echo "missing javadoc HTML: ${JAVADOC_HTML_SRC}/index.html" >&2
+  exit 1
+fi
 
 mkdir -p \
   "${DEST}/maven/${GROUP_PATH}/${ARTIFACT}/${VERSION}" \
   "${DEST}/crates" \
-  "${DEST}/bundles"
+  "${DEST}/bundles" \
+  "${DEST}/javadoc"
 
 # --- crates ---
 cp -f "${CRATE_SRC}" "${DEST}/crates/"
@@ -50,9 +61,28 @@ sha256sum "${CRATE_SRC}" | awk '{print $1}' > "${DEST}/crates/${CRATE_NAME}-${VE
 cp -f "${BUNDLE_SRC}" "${DEST}/bundles/"
 sha256sum "${BUNDLE_SRC}" | awk '{print $1}' > "${DEST}/bundles/${CRATE_NAME}-${VERSION}-bundle.tar.gz.sha256"
 
+# --- javadoc HTML (latest overwrite; versioned copy kept under javadoc/<ver>/) ---
+rm -rf "${DEST}/javadoc/latest" "${DEST}/javadoc/${VERSION}"
+mkdir -p "${DEST}/javadoc/latest" "${DEST}/javadoc/${VERSION}"
+cp -a "${JAVADOC_HTML_SRC}/." "${DEST}/javadoc/latest/"
+cp -a "${JAVADOC_HTML_SRC}/." "${DEST}/javadoc/${VERSION}/"
+cat > "${DEST}/javadoc/index.html" <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=latest/index.html">
+  <title>mcdx-ql Javadoc</title>
+  <link rel="canonical" href="latest/index.html">
+</head>
+<body><p><a href="latest/index.html">mcdx-ql ${VERSION} Javadoc</a></p></body>
+</html>
+EOF
+
 # --- maven artifact ---
 MAVEN_DIR="${DEST}/maven/${GROUP_PATH}/${ARTIFACT}/${VERSION}"
 cp -f "${JAR_SRC}" "${MAVEN_DIR}/${ARTIFACT}-${VERSION}.jar"
+cp -f "${JAVADOC_JAR_SRC}" "${MAVEN_DIR}/${ARTIFACT}-${VERSION}-javadoc.jar"
 cp -f "${POM_SRC}" "${MAVEN_DIR}/${ARTIFACT}-${VERSION}.pom"
 
 checksums() {
@@ -62,6 +92,7 @@ checksums() {
   sha256sum "${f}" | awk '{print $1}' > "${f}.sha256"
 }
 checksums "${MAVEN_DIR}/${ARTIFACT}-${VERSION}.jar"
+checksums "${MAVEN_DIR}/${ARTIFACT}-${VERSION}-javadoc.jar"
 checksums "${MAVEN_DIR}/${ARTIFACT}-${VERSION}.pom"
 
 # --- maven-metadata.xml (merge versions) ---
@@ -124,6 +155,11 @@ crates = sorted(p.name for p in (dest / "crates").glob("*.crate"))
 jars = sorted(
     str(p.relative_to(dest))
     for p in (dest / "maven").rglob("*.jar")
+    if not p.name.endswith("-javadoc.jar")
+)
+javadoc_jars = sorted(
+    str(p.relative_to(dest))
+    for p in (dest / "maven").rglob("*-javadoc.jar")
 )
 bundles = sorted(p.name for p in (dest / "bundles").glob("*.tar.gz"))
 index = {
@@ -132,6 +168,8 @@ index = {
     "latest": "${VERSION}",
     "crates": crates,
     "maven_jars": jars,
+    "javadoc_jars": javadoc_jars,
+    "javadoc_html": "javadoc/latest/index.html",
     "bundles": bundles,
 }
 (dest / "index.json").write_text(json.dumps(index, indent=2) + "\n")
@@ -150,8 +188,15 @@ Latest published from source: **${VERSION}**
 | Path | Contents |
 |------|----------|
 | \`crates/mcdx_ql-*.crate\` | \`cargo package\` output |
-| \`maven/com/nilpferdschaefer/mcdx-ql/\` | Maven2 repo (JAR + POM + metadata) |
-| \`bundles/mcdx_ql-*-bundle.tar.gz\` | crate + rustdoc + JAR |
+| \`maven/com/nilpferdschaefer/mcdx-ql/\` | Maven2 repo (JAR + javadoc JAR + POM + metadata) |
+| \`javadoc/\` | Javadoc HTML (\`javadoc/latest/\`, \`javadoc/<ver>/\`) |
+| \`bundles/mcdx_ql-*-bundle.tar.gz\` | crate + rustdoc + JAR + javadoc |
+
+## Javadoc
+
+- HTML: https://raw.githubusercontent.com/nilpferdschaefer/mcdx-ql/binary/javadoc/latest/index.html
+  (browse via the GitHub UI under \`javadoc/latest/\`, or the GitHub Pages site)
+- Maven classifier: \`mcdx-ql-${VERSION}-javadoc.jar\`
 
 ## Java (Maven / Gradle)
 

@@ -56,10 +56,10 @@ p.write_text(text2)
 PY
 
 if command -v mvn >/dev/null 2>&1; then
-  echo "==> mvn package"
+  echo "==> mvn package (JAR + Javadoc)"
   (cd java && mvn -q -DskipTests package)
 else
-  echo "==> mvn not found; compiling JAR with javac"
+  echo "==> mvn not found; compiling JAR with javac + javadoc"
   JAVA_OUT="java/target/classes"
   mkdir -p "${JAVA_OUT}"
   find java/src/main/java -name '*.java' > /tmp/mcdx_ql_sources.txt
@@ -69,13 +69,42 @@ else
   jar cf "${JAR_PATH}" -C "${JAVA_OUT}" .
   jar uf "${JAR_PATH}" -C java/src/main/resources .
   echo "built ${JAR_PATH}"
+
+  JAVADOC_OUT="java/target/reports/apidocs"
+  mkdir -p "${JAVADOC_OUT}"
+  javadoc --release 21 -d "${JAVADOC_OUT}" -quiet \
+    -windowtitle "mcdx-ql ${VERSION} API" \
+    -doctitle "mcdx-ql ${VERSION}" \
+    @"/tmp/mcdx_ql_sources.txt"
+  JAVADOC_JAR="java/target/mcdx-ql-${VERSION}-javadoc.jar"
+  jar cf "${JAVADOC_JAR}" -C "${JAVADOC_OUT}" .
+  echo "built ${JAVADOC_JAR}"
 fi
 
 JAR="$(ls -1 java/target/mcdx-ql-${VERSION}.jar 2>/dev/null | head -1)"
 if [[ -z "${JAR}" ]]; then
-  JAR="$(ls -1 java/target/mcdx-ql-*.jar | head -1)"
+  JAR="$(ls -1 java/target/mcdx-ql-*.jar | grep -v javadoc | head -1)"
 fi
 echo "==> JAR: ${JAR}"
+
+JAVADOC_HTML="java/target/reports/apidocs"
+if [[ ! -f "${JAVADOC_HTML}/index.html" ]]; then
+  # maven-javadoc-plugin may write to target/apidocs depending on version/config
+  if [[ -f java/target/apidocs/index.html ]]; then
+    JAVADOC_HTML="java/target/apidocs"
+  else
+    echo "javadoc HTML not found under java/target/{reports/apidocs,apidocs}" >&2
+    exit 1
+  fi
+fi
+echo "==> Javadoc: ${JAVADOC_HTML}"
+
+JAVADOC_JAR="java/target/mcdx-ql-${VERSION}-javadoc.jar"
+if [[ ! -f "${JAVADOC_JAR}" ]]; then
+  echo "javadoc jar missing: ${JAVADOC_JAR}" >&2
+  exit 1
+fi
+echo "==> Javadoc JAR: ${JAVADOC_JAR}"
 
 # Smoke test
 echo "==> smoke test"
