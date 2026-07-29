@@ -143,8 +143,9 @@ On every push to `main`, on `v*.*.*` tags, and via workflow_dispatch, [Publish b
 | Path | Contents |
 |------|----------|
 | `crates/mcdx_ql-<ver>.crate` | `cargo package` output |
-| `maven/com/nilpferdschaefer/mcdx-ql/` | Maven2 layout (JAR + POM + metadata) |
-| `bundles/mcdx_ql-<ver>-bundle.tar.gz` | crate + rustdoc + JAR |
+| `maven/com/nilpferdschaefer/mcdx-ql/` | Maven2 layout (JAR + javadoc JAR + POM + metadata) |
+| `javadoc/` | Javadoc HTML (`latest/` + versioned) |
+| `bundles/mcdx_ql-<ver>-bundle.tar.gz` | crate + rustdoc + JAR + javadoc |
 | `index.json` | published file listing |
 
 ### Rust: git dependency
@@ -214,6 +215,8 @@ Every CI run on `main` / PRs and every `v*.*.*` tag uploads
 | `mcdx_ql-<version>.crate` | `cargo package` output |
 | `docs/` | rustdoc HTML — open `docs/mcdx_ql/index.html` |
 | `java/mcdx-ql-<version>.jar` | Java bindings + embedded JNI lib |
+| `java/mcdx-ql-<version>-javadoc.jar` | Javadoc JAR |
+| `java/javadoc/` | Javadoc HTML |
 | `java/native/` | raw native libs |
 
 ```bash
@@ -225,9 +228,14 @@ java -cp mcdx_ql-0.1.0/java/mcdx-ql-0.1.0.jar com.nilpferdschaefer.mcdxql.SmokeT
 
 ### Docs site
 
-On push to `main` and on version tags, rustdoc is deployed to GitHub Pages:
+On push to `main` and on version tags, docs are deployed to GitHub Pages:
 
 https://nilpferdschaefer.github.io/mcdx-ql/
+
+- Rust: `/mcdx_ql/`
+- Java: `/javadoc/`
+
+Javadoc HTML is also on the `binary` branch under `javadoc/latest/`.
 
 Enable once under **Settings → Pages → Build and deployment → GitHub Actions** (private Pages requires an eligible GitHub plan).
 
