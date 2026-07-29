@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["SqlValue"],"fn":["map_sql_row"],"mod":["sql_columns"],"struct":["IndicatorComputeRow","MapRowError"]};

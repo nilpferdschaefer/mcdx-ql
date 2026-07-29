@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["AssetRef","BatchExpr","BinOp","CallOp","Expr","LookbackBound","TrailingPeriod","WindowSpec"],"struct":["DomainBound","Series","SeriesDomain"]};

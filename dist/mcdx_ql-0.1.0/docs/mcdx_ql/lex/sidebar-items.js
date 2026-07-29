@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["TokenKind"],"fn":["lex_number","tokenize"],"struct":["Token"]};

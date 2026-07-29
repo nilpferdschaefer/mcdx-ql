@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["interval_ms"],"struct":["IntervalError"]};
