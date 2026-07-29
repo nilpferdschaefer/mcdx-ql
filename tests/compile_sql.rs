@@ -195,34 +195,6 @@ fn compiles_ema_close_sql_shape() {
 }
 
 #[test]
-fn period_indicators_use_finite_version_window() {
-    // Regression: EMA/RMA/RSI version must match SMA's ROWS BETWEEN (N-1)
-    // PRECEDING frame — not UNBOUNDED PRECEDING (which pulls older versions).
-    for expr in [
-        "EMA([close.1h; $from:$to], $period)",
-        "RMA(TR([close.1h; $from:$to]), $period)",
-        "RSI([close.1h; $from:$to], $period)",
-        "AVG([close.1h; $from:$to], $period)",
-    ] {
-        let q = compile(&req(expr)).unwrap();
-        assert!(
-            q.sql.contains("MAX(e.version) OVER w_close_1h_14"),
-            "expected finite version window for {expr}"
-        );
-        assert!(
-            !q.sql.contains(
-                "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
-            ),
-            "version must not use UNBOUNDED PRECEDING for {expr}"
-        );
-        assert!(
-            q.sql.contains("ROWS BETWEEN 13 PRECEDING AND CURRENT ROW"),
-            "named window must be finite 14-bar frame for {expr}"
-        );
-    }
-}
-
-#[test]
 fn compiles_atr_wilder_seed_bars() {
     let q = compile(&req("RMA(TR([close.1d; $from:$to]), $period)")).unwrap();
     assert!(q.sql.contains("WHERE t.ord BETWEEN 2 AND 15"));
@@ -265,24 +237,6 @@ fn worked_mapping_vol_96() {
 }
 
 #[test]
-fn vol_version_skips_constant_scale_and_avoids_min_bigint_cast() {
-    // Regression: STD * SQRT($bars_per_year) must not wrap version in
-    // GREATEST(COALESCE(…, -9223372036854775808::bigint), …) — that cast
-    // fails Postgres parse (`bigint out of range`). Emit plain MAX like v1.
-    let mut r = req(
-        "{ vol_14: STD(RET([close.1h; $from:$to]), 14) * SQRT($bars_per_year), \
-           vol_31: STD(RET([close.1h; $from:$to]), 31) * SQRT($bars_per_year) }",
-    );
-    r.params
-        .insert("bars_per_year".into(), ParamValue::Int(8760));
-    let q = compile(&r).unwrap();
-    assert!(q.sql.contains("MAX(e.version) OVER w_ret_1h_14 AS ver_0"));
-    assert!(q.sql.contains("MAX(e.version) OVER w_ret_1h_31 AS ver_1"));
-    assert!(!q.sql.contains("-9223372036854775808::bigint"));
-    assert!(!q.sql.contains("COALESCE(MAX(e.version)"));
-}
-
-#[test]
 fn worked_mapping_sep_atr() {
     let mut r = req(
         "(AVG([close.1d; $from:$to], $fast) - AVG([close.1d; $from:$to], $slow)) / RMA(TR([close.1d; $from:$to]), $atr)",
@@ -293,38 +247,6 @@ fn worked_mapping_sep_atr() {
     let q = compile(&r).unwrap();
     assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_5"));
     assert_eq!(q.max_lookback, 50);
-}
-
-#[test]
-fn sep_atr_version_is_greatest_of_finite_windows_only() {
-    // Regression: sep_atr version = GREATEST of w_close_{atr,fast,slow} only —
-    // no UNBOUNDED PRECEDING arm, no Long.MIN_VALUE::bigint cast.
-    let mut r = req(
-        "{ sep_atr: (AVG([close.1h; $from:$to], $fast) - AVG([close.1h; $from:$to], $slow)) \
-           / RMA(TR([close.1h; $from:$to]), $atr) }",
-    );
-    r.params.insert("atr".into(), ParamValue::Int(14));
-    r.params.insert("fast".into(), ParamValue::Int(48));
-    r.params.insert("slow".into(), ParamValue::Int(96));
-    let q = compile(&r).unwrap();
-    assert!(q.sql.contains("MAX(e.version) OVER w_close_1h_48"));
-    assert!(q.sql.contains("MAX(e.version) OVER w_close_1h_96"));
-    assert!(q.sql.contains("MAX(e.version) OVER w_close_1h_14"));
-    assert!(q.sql.contains("GREATEST("));
-    assert!(!q.sql.contains("-9223372036854775808::bigint"));
-    assert!(
-        !q.sql.contains(
-            "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
-        ),
-        "sep_atr version must not include an unbounded ATR arm"
-    );
-    for period in [14, 48, 96] {
-        let preceding = period - 1;
-        assert!(
-            q.sql.contains(&format!("ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW")),
-            "missing finite window for period {period}"
-        );
-    }
 }
 
 #[test]
@@ -371,4 +293,222 @@ fn rejects_rsi_period_lt_2() {
 fn var_and_std_fragments() {
     let q = compile(&req("STD([close.1d; $from:$to], $period)")).unwrap();
     assert!(q.sql.contains("AVG(e.close * e.close) OVER w_close_1d_14"));
+}
+
+// ---------------------------------------------------------------------------
+// Consumer regression QL inputs (close.1h; publish windows 14 & 31)
+// Assert generated version / warmup / window / value SQL shapes.
+// ---------------------------------------------------------------------------
+
+fn assert_contains(sql: &str, fragment: &str) {
+    assert!(
+        sql.contains(fragment),
+        "missing fragment:\n{fragment}\n--- in sql ---\n{sql}"
+    );
+}
+
+fn assert_named_window(sql: &str, name: &str, preceding: i32) {
+    assert_contains(
+        sql,
+        &format!(
+            "{name} AS (\n\
+             \x20     PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start\n\
+             \x20     ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW\n\
+             \x20   )"
+        ),
+    );
+}
+
+fn assert_version_sql_hygiene(sql: &str) {
+    // Bare Long.MIN_VALUE::bigint fails Postgres parse; only numeric form is OK
+    // in publish_from / after_ts filters.
+    assert!(
+        !sql.contains("-9223372036854775808::bigint"),
+        "must not emit Long.MIN_VALUE::bigint cast"
+    );
+    assert!(
+        !sql.contains(
+            "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+        ),
+        "period-N version must not use UNBOUNDED PRECEDING"
+    );
+    assert!(
+        !sql.contains("COALESCE(MAX(e.version)"),
+        "version must not wrap MAX in COALESCE(..., Long.MIN_VALUE)"
+    );
+}
+
+fn assert_unpivot(sql: &str, stem: &str, idx: usize) {
+    assert_contains(sql, &format!("('{stem}', v_{idx}, ver_{idx}, w_{idx})"));
+}
+
+#[test]
+fn consumer_sql_sma_14_31() {
+    // Golden reference: finite-window MAX(version).
+    let q = compile(&req(
+        "{ sma_14: AVG([close.1h; $from:$to], 14), sma_31: AVG([close.1h; $from:$to], 31) }",
+    ))
+    .unwrap();
+    assert_eq!(q.indicators, vec!["sma_14".to_string(), "sma_31".to_string()]);
+    assert_eq!(q.max_lookback, 31);
+    assert_eq!(q.reporting_period, "1h");
+
+    assert_contains(&q.sql, "AVG(e.close) OVER w_close_1h_14 AS v_0");
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_14 AS ver_0");
+    assert_contains(&q.sql, "(COUNT(*) OVER w_close_1h_14) >= 14 AS w_0");
+    assert_contains(&q.sql, "AVG(e.close) OVER w_close_1h_31 AS v_1");
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_31 AS ver_1");
+    assert_contains(&q.sql, "(COUNT(*) OVER w_close_1h_31) >= 31 AS w_1");
+    assert_named_window(&q.sql, "w_close_1h_14", 13);
+    assert_named_window(&q.sql, "w_close_1h_31", 30);
+    assert_unpivot(&q.sql, "sma_14", 0);
+    assert_unpivot(&q.sql, "sma_31", 1);
+    assert_version_sql_hygiene(&q.sql);
+}
+
+#[test]
+fn consumer_sql_atr_14_31() {
+    let q = compile(&req(
+        "{ atr_14: RMA(TR([close.1h; $from:$to]), 14), atr_31: RMA(TR([close.1h; $from:$to]), 31) }",
+    ))
+    .unwrap();
+    assert_eq!(q.indicators, vec!["atr_14".to_string(), "atr_31".to_string()]);
+    assert_eq!(q.max_lookback, 32); // period+1 warmup
+    assert!(q.scaffolds.closes_to_date);
+
+    // Version matches SMA finite frames (not unbounded).
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_14 AS ver_0");
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_31 AS ver_1");
+    assert_contains(&q.sql, "(array_length(e.closes_to_date, 1) >= 15) AS w_0");
+    assert_contains(&q.sql, "(array_length(e.closes_to_date, 1) >= 32) AS w_1");
+    // Wilder ATR value shape for both periods.
+    assert_contains(&q.sql, "WHERE t.ord BETWEEN 2 AND 15");
+    assert_contains(&q.sql, "WHERE t.ord BETWEEN 2 AND 32");
+    assert_contains(&q.sql, "(r.atr * (14 - 1) + t.tr) / 14");
+    assert_contains(&q.sql, "(r.atr * (31 - 1) + t.tr) / 31");
+    assert_named_window(&q.sql, "w_close_1h_14", 13);
+    assert_named_window(&q.sql, "w_close_1h_31", 30);
+    assert_unpivot(&q.sql, "atr_14", 0);
+    assert_unpivot(&q.sql, "atr_31", 1);
+    assert_version_sql_hygiene(&q.sql);
+}
+
+#[test]
+fn consumer_sql_rsi_14_31() {
+    let q = compile(&req(
+        "{ rsi_14: RSI([close.1h; $from:$to], 14), rsi_31: RSI([close.1h; $from:$to], 31) }",
+    ))
+    .unwrap();
+    assert_eq!(q.indicators, vec!["rsi_14".to_string(), "rsi_31".to_string()]);
+    assert_eq!(q.max_lookback, 32);
+    assert!(q.scaffolds.closes_to_date);
+
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_14 AS ver_0");
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_31 AS ver_1");
+    assert_contains(&q.sql, "(array_length(e.closes_to_date, 1) >= 15) AS w_0");
+    assert_contains(&q.sql, "(array_length(e.closes_to_date, 1) >= 32) AS w_1");
+    assert_contains(&q.sql, "WHERE c.ord BETWEEN 2 AND 15");
+    assert_contains(&q.sql, "WHERE c.ord BETWEEN 2 AND 32");
+    assert_contains(
+        &q.sql,
+        "ELSE 100.0 - (100.0 / (1.0 + (r.avg_gain / r.avg_loss)))",
+    );
+    assert_named_window(&q.sql, "w_close_1h_14", 13);
+    assert_named_window(&q.sql, "w_close_1h_31", 30);
+    assert_unpivot(&q.sql, "rsi_14", 0);
+    assert_unpivot(&q.sql, "rsi_31", 1);
+    assert_version_sql_hygiene(&q.sql);
+}
+
+#[test]
+fn consumer_sql_ema_14_31() {
+    let q = compile(&req(
+        "{ ema_14: EMA([close.1h; $from:$to], 14), ema_31: EMA([close.1h; $from:$to], 31) }",
+    ))
+    .unwrap();
+    assert_eq!(q.indicators, vec!["ema_14".to_string(), "ema_31".to_string()]);
+    assert_eq!(q.max_lookback, 31);
+    assert!(q.scaffolds.closes_to_date);
+
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_14 AS ver_0");
+    assert_contains(&q.sql, "MAX(e.version) OVER w_close_1h_31 AS ver_1");
+    assert_contains(&q.sql, "(array_length(e.closes_to_date, 1) >= 14) AS w_0");
+    assert_contains(&q.sql, "(array_length(e.closes_to_date, 1) >= 31) AS w_1");
+    assert_contains(&q.sql, "array_length(e.closes_to_date, 1) < 14");
+    assert_contains(&q.sql, "array_length(e.closes_to_date, 1) < 31");
+    assert_contains(&q.sql, "v.c * (2.0/(14+1.0)) + r.ema * (1.0 - (2.0/(14+1.0)))");
+    assert_contains(&q.sql, "v.c * (2.0/(31+1.0)) + r.ema * (1.0 - (2.0/(31+1.0)))");
+    assert_named_window(&q.sql, "w_close_1h_14", 13);
+    assert_named_window(&q.sql, "w_close_1h_31", 30);
+    assert_unpivot(&q.sql, "ema_14", 0);
+    assert_unpivot(&q.sql, "ema_31", 1);
+    assert_version_sql_hygiene(&q.sql);
+}
+
+#[test]
+fn consumer_sql_vol_14_31() {
+    let mut r = req(
+        "{ vol_14: STD(RET([close.1h; $from:$to]), 14) * SQRT($bars_per_year), \
+           vol_31: STD(RET([close.1h; $from:$to]), 31) * SQRT($bars_per_year) }",
+    );
+    r.params
+        .insert("bars_per_year".into(), ParamValue::Int(8760));
+    let q = compile(&r).unwrap();
+    assert_eq!(q.indicators, vec!["vol_14".to_string(), "vol_31".to_string()]);
+    assert_eq!(q.max_lookback, 31);
+    assert!(q.scaffolds.bar_ret);
+
+    // Plain MAX like v1 — constant SQRT scale must not introduce MIN_VALUE coalesce.
+    assert_contains(
+        &q.sql,
+        "(SQRT(GREATEST(0, (AVG(e.bar_ret * e.bar_ret) OVER w_ret_1h_14 - POWER(AVG(e.bar_ret) OVER w_ret_1h_14, 2)))) * SQRT(8760)) AS v_0",
+    );
+    assert_contains(&q.sql, "MAX(e.version) OVER w_ret_1h_14 AS ver_0");
+    assert_contains(&q.sql, "((COUNT(*) OVER w_ret_1h_14) >= 14 AND TRUE) AS w_0");
+    assert_contains(
+        &q.sql,
+        "(SQRT(GREATEST(0, (AVG(e.bar_ret * e.bar_ret) OVER w_ret_1h_31 - POWER(AVG(e.bar_ret) OVER w_ret_1h_31, 2)))) * SQRT(8760)) AS v_1",
+    );
+    assert_contains(&q.sql, "MAX(e.version) OVER w_ret_1h_31 AS ver_1");
+    assert_contains(&q.sql, "((COUNT(*) OVER w_ret_1h_31) >= 31 AND TRUE) AS w_1");
+    assert_named_window(&q.sql, "w_ret_1h_14", 13);
+    assert_named_window(&q.sql, "w_ret_1h_31", 30);
+    assert_unpivot(&q.sql, "vol_14", 0);
+    assert_unpivot(&q.sql, "vol_31", 1);
+    assert_version_sql_hygiene(&q.sql);
+}
+
+#[test]
+fn consumer_sql_sep_atr() {
+    let mut r = req(
+        "{ sep_atr: (AVG([close.1h; $from:$to], $fast) - AVG([close.1h; $from:$to], $slow)) \
+           / RMA(TR([close.1h; $from:$to]), $atr) }",
+    );
+    r.params.insert("atr".into(), ParamValue::Int(14));
+    r.params.insert("fast".into(), ParamValue::Int(48));
+    r.params.insert("slow".into(), ParamValue::Int(96));
+    let q = compile(&r).unwrap();
+    assert_eq!(q.indicators, vec!["sep_atr".to_string()]);
+    assert_eq!(q.max_lookback, 96);
+    assert!(q.scaffolds.closes_to_date);
+
+    assert_contains(
+        &q.sql,
+        "(AVG(e.close) OVER w_close_1h_48 - AVG(e.close) OVER w_close_1h_96)",
+    );
+    assert_contains(&q.sql, "WHERE t.ord BETWEEN 2 AND 15");
+    // GREATEST of finite atr/fast/slow frames only (nested from binary ops).
+    assert_contains(
+        &q.sql,
+        "GREATEST(GREATEST(MAX(e.version) OVER w_close_1h_48, MAX(e.version) OVER w_close_1h_96), MAX(e.version) OVER w_close_1h_14) AS ver_0",
+    );
+    assert_contains(
+        &q.sql,
+        "(((COUNT(*) OVER w_close_1h_48) >= 48 AND (COUNT(*) OVER w_close_1h_96) >= 96) AND (array_length(e.closes_to_date, 1) >= 15)) AS w_0",
+    );
+    assert_named_window(&q.sql, "w_close_1h_14", 13);
+    assert_named_window(&q.sql, "w_close_1h_48", 47);
+    assert_named_window(&q.sql, "w_close_1h_96", 95);
+    assert_unpivot(&q.sql, "sep_atr", 0);
+    assert_version_sql_hygiene(&q.sql);
 }
