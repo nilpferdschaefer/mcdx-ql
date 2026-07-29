@@ -12,10 +12,31 @@
   <description>Java bindings for mcdx_ql (indicator grammar → SQL)</description>
   <url>https://github.com/nilpferdschaefer/mcdx-ql</url>
 
+  <scm>
+    <url>https://github.com/nilpferdschaefer/mcdx-ql</url>
+    <connection>scm:git:https://github.com/nilpferdschaefer/mcdx-ql.git</connection>
+    <developerConnection>scm:git:https://github.com/nilpferdschaefer/mcdx-ql.git</developerConnection>
+  </scm>
+
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>21</maven.compiler.release>
+    <!-- Overridden in CI: https://maven.pkg.github.com/OWNER/REPO -->
+    <github.maven.repo>https://maven.pkg.github.com/nilpferdschaefer/mcdx-ql</github.maven.repo>
   </properties>
+
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>${github.maven.repo}</url>
+    </repository>
+    <snapshotRepository>
+      <id>github</id>
+      <name>GitHub Packages Snapshots</name>
+      <url>${github.maven.repo}</url>
+    </snapshotRepository>
+  </distributionManagement>
 
   <build>
     <resources>

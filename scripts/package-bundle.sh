@@ -46,7 +46,7 @@ Rust (sibling private repos):
   mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", tag = "v${VERSION}" }
 
 Java:
-  // Maven: binary branch repo — see README
+  // Maven: GitHub Packages — see README
   java -cp java/mcdx-ql-${VERSION}.jar com.nilpferdschaefer.mcdxql.SmokeTest
   open java/javadoc/index.html
 

@@ -1,0 +1,142 @@
+name: Publish GitHub Packages
+
+# Publishes the Java JAR (+ javadoc jar) to GitHub Packages (Maven).
+# Dev (main / workflow_dispatch): VERSION-SNAPSHOT (overwriteable).
+# Release tags vX.Y.Z: immutable X.Y.Z.
+#
+# Rust is not hosted on GitHub Packages — consumers use a git dependency.
+# Javadoc HTML continues to ship via GitHub Pages (/javadoc/).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-packages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: build + deploy Maven package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Java (GitHub Packages settings.xml)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+          settings-path: ${{ github.workspace }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Maven
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('java/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Resolve publish version
+        id: ver
+        run: |
+          set -euo pipefail
+          BASE="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            EXPECTED="v${BASE}"
+            if [[ "${TAG}" != "${EXPECTED}" ]]; then
+              echo "Tag ${TAG} does not match Cargo.toml version ${EXPECTED}" >&2
+              exit 1
+            fi
+            PUBLISH_VERSION="${BASE}"
+            MODE="release"
+          else
+            # Dev overwrite: SNAPSHOT versions can be replaced on GitHub Packages.
+            PUBLISH_VERSION="${BASE}-SNAPSHOT"
+            MODE="snapshot"
+          fi
+          echo "base=${BASE}" >> "$GITHUB_OUTPUT"
+          echo "version=${PUBLISH_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "Publishing Java package as ${PUBLISH_VERSION} (${MODE})"
+
+      - name: Build JAR + Javadoc
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          # build-jar.sh syncs pom to Cargo.toml base version; we re-stamp below.
+          ./scripts/build-jar.sh
+
+      - name: Stamp pom for deploy
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          REPO_URL="https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
+          python3 - <<PY
+          from pathlib import Path
+          import re
+          version = "${VERSION}"
+          repo = "${REPO_URL}"
+          p = Path("java/pom.xml")
+          text = p.read_text()
+          text, n = re.subn(
+              r"(<artifactId>mcdx-ql</artifactId>\s*<version>)[^<]+(</version>)",
+              rf"\g<1>{version}\g<2>",
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit(f"failed to stamp pom version (n={n})")
+          text, n = re.subn(
+              r"(<github.maven.repo>)[^<]+(</github.maven.repo>)",
+              rf"\g<1>{repo}\g<2>",
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit(f"failed to stamp github.maven.repo (n={n})")
+          p.write_text(text)
+          print(f"pom version={version} repo={repo}")
+          PY
+
+      - name: Deploy to GitHub Packages
+        working-directory: java
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mvn -B -DskipTests deploy -s "${GITHUB_WORKSPACE}/settings.xml"
+
+      - name: Summary
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          MODE="${{ steps.ver.outputs.mode }}"
+          {
+            echo "## GitHub Packages (Maven)"
+            echo ""
+            echo "- Package: \`com.nilpferdschaefer:mcdx-ql:${VERSION}\`"
+            echo "- Mode: \`${MODE}\` (SNAPSHOT = overwriteable in dev)"
+            echo "- Registry: \`https://maven.pkg.github.com/${GITHUB_REPOSITORY}\`"
+            echo "- UI: ${{ github.server_url }}/${{ github.repository }}/packages"
+            echo "- Javadoc HTML: https://nilpferdschaefer.github.io/mcdx-ql/javadoc/"
+            echo ""
+            echo "Rust crates are **not** published here — use a git dependency on \`main\` / a tag."
+          } >> "$GITHUB_STEP_SUMMARY"
