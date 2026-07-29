@@ -1,0 +1,14 @@
+{
+  "package": "mcdx_ql",
+  "updated": "2026-07-29T19:34:45Z",
+  "latest": "0.1.0",
+  "crates": [
+    "mcdx_ql-0.1.0.crate"
+  ],
+  "maven_jars": [
+    "maven/com/nilpferdschaefer/mcdx-ql/0.1.0/mcdx-ql-0.1.0.jar"
+  ],
+  "bundles": [
+    "mcdx_ql-0.1.0-bundle.tar.gz"
+  ]
+}
