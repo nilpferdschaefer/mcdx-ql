@@ -134,7 +134,18 @@ err.to_error_json()
 
 ## Using from other `nilpferdschaefer` repos
 
-This crate is **not** published to crates.io. Sibling private repos should depend via git (Rust) or the shipped JAR (Java). CI publishes versioned bundles + rustdoc + JAR.
+This crate is **not** published to crates.io. Sibling private repos should depend via git (Rust) or the Maven JAR from this repo’s **`binary`** branch. CI also uploads workflow/release artifacts and rustdoc.
+
+### Binary repo (`binary` branch)
+
+On every push to `main`, on `v*.*.*` tags, and via workflow_dispatch, [Publish binary repo](.github/workflows/publish-binary.yml) builds the crate + JAR and commits them to the [`binary`](https://github.com/nilpferdschaefer/mcdx-ql/tree/binary) branch:
+
+| Path | Contents |
+|------|----------|
+| `crates/mcdx_ql-<ver>.crate` | `cargo package` output |
+| `maven/com/nilpferdschaefer/mcdx-ql/` | Maven2 layout (JAR + POM + metadata) |
+| `bundles/mcdx_ql-<ver>-bundle.tar.gz` | crate + rustdoc + JAR |
+| `index.json` | published file listing |
 
 ### Rust: git dependency
 
@@ -147,7 +158,29 @@ mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", tag = "v0.1.0" 
 
 Private git deps need a credential with read access (SSH deploy key, `GITHUB_TOKEN` / `GH_TOKEN` with `contents: read`, or `CARGO_NET_GIT_FETCH_WITH_CLI=true` + `gh` auth).
 
-### Java: JAR (JNI)
+Packed crates are also on the binary branch:
+
+```bash
+curl -fsSL -o mcdx_ql-0.1.0.crate \
+  https://raw.githubusercontent.com/nilpferdschaefer/mcdx-ql/binary/crates/mcdx_ql-0.1.0.crate
+```
+
+### Java: Maven from the binary branch
+
+```xml
+<repositories>
+  <repository>
+    <id>mcdx-ql-binary</id>
+    <url>https://raw.githubusercontent.com/nilpferdschaefer/mcdx-ql/binary/maven</url>
+  </repository>
+</repositories>
+
+<dependency>
+  <groupId>com.nilpferdschaefer</groupId>
+  <artifactId>mcdx-ql</artifactId>
+  <version>0.1.0</version>
+</dependency>
+```
 
 ```java
 import com.nilpferdschaefer.mcdxql.McdxQl;
@@ -169,7 +202,7 @@ Build locally (needs JDK 21 + Maven):
 # → java/target/mcdx-ql-0.1.0.jar  (embeds native/linux-x86_64/libmcdx_ql.so on Linux CI/dev)
 ```
 
-CI also uploads `mcdx-ql-<version>.jar` as a standalone workflow/release asset. The JAR currently embeds the **linux-x86_64** native library from the Ubuntu builder; other platforms can run `./scripts/build-jar.sh` on that host and consume the produced JAR.
+The JAR currently embeds the **linux-x86_64** native library from the Ubuntu builder; other platforms can run `./scripts/build-jar.sh` on that host.
 
 ### Local artifact bundle
 
@@ -200,9 +233,10 @@ Enable once under **Settings → Pages → Build and deployment → GitHub Actio
 
 ### Cutting a release
 
-1. Bump `version` in `Cargo.toml`
+1. Bump `version` in `Cargo.toml` (and keep `java/pom.xml` in sync — `build-jar.sh` patches it)
 2. Tag `vX.Y.Z` matching that version and push the tag
-3. `Release` workflow attaches the bundle + `.crate` to the GitHub Release and refreshes Pages
+3. `Release` workflow attaches the bundle + JAR to the GitHub Release and refreshes Pages
+4. `Publish binary repo` updates the `binary` branch Maven/crate tree for that version
 
 ## Develop
 
