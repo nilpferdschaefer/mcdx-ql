@@ -134,18 +134,47 @@ err.to_error_json()
 
 ## Using from other `nilpferdschaefer` repos
 
-This crate is **not** published to crates.io. Sibling private repos should depend via git (Rust) or the Maven JAR from this repo’s **`binary`** branch. CI also uploads workflow/release artifacts and rustdoc.
+This crate is **not** published to crates.io (GitHub Packages has no Cargo registry). Sibling repos should depend via **git** (Rust) or **GitHub Packages Maven** (Java). CI also uploads workflow/release bundles and rustdoc/Javadoc to Pages.
 
-### Binary repo (`binary` branch)
+### GitHub Packages (Maven — JAR + crate together)
 
-On every push to `main`, on `v*.*.*` tags, and via workflow_dispatch, [Publish binary repo](.github/workflows/publish-binary.yml) builds the crate + JAR and commits them to the [`binary`](https://github.com/nilpferdschaefer/mcdx-ql/tree/binary) branch:
+[Publish GitHub Packages](.github/workflows/publish-packages.yml) deploys one Maven package `com.nilpferdschaefer:mcdx-ql` containing:
 
-| Path | Contents |
-|------|----------|
-| `crates/mcdx_ql-<ver>.crate` | `cargo package` output |
-| `maven/com/nilpferdschaefer/mcdx-ql/` | Maven2 layout (JAR + POM + metadata) |
-| `bundles/mcdx_ql-<ver>-bundle.tar.gz` | crate + rustdoc + JAR |
-| `index.json` | published file listing |
+| Artifact | Classifier | Contents |
+|----------|------------|----------|
+| `mcdx-ql-<ver>.jar` | (default) | Java bindings + JNI |
+| `mcdx-ql-<ver>-javadoc.jar` | `javadoc` | Javadoc |
+| `mcdx-ql-<ver>-crate.crate` | `crate` | Rust `cargo package` output |
+
+Registry: `https://maven.pkg.github.com/nilpferdschaefer/mcdx-ql`
+
+| Trigger | Published version | Overwrite? |
+|---------|-------------------|------------|
+| `main` / `workflow_dispatch` | `X.Y.Z-SNAPSHOT` | yes (dev) |
+| tag `vX.Y.Z` | `X.Y.Z` | no (immutable release) |
+
+```xml
+<repositories>
+  <repository>
+    <id>github</id>
+    <url>https://maven.pkg.github.com/nilpferdschaefer/mcdx-ql</url>
+  </repository>
+</repositories>
+
+<dependency>
+  <groupId>com.nilpferdschaefer</groupId>
+  <artifactId>mcdx-ql</artifactId>
+  <!-- dev: -->
+  <version>0.1.0-SNAPSHOT</version>
+  <!-- release: <version>0.1.0</version> -->
+</dependency>
+```
+
+Authenticate with a PAT (or `GITHUB_TOKEN` in Actions) that has `read:packages` — put it in `~/.m2/settings.xml` under server id `github` (username = your GitHub login).
+
+Package UI: https://github.com/nilpferdschaefer/mcdx-ql/packages
+
+GitHub Packages is **not** a Cargo registry. For Cargo builds use a git dependency; grab the attached `-crate.crate` from Packages only if you want to vendor/download the packed crate next to the JAR.
 
 ### Rust: git dependency
 
@@ -158,29 +187,7 @@ mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", tag = "v0.1.0" 
 
 Private git deps need a credential with read access (SSH deploy key, `GITHUB_TOKEN` / `GH_TOKEN` with `contents: read`, or `CARGO_NET_GIT_FETCH_WITH_CLI=true` + `gh` auth).
 
-Packed crates are also on the binary branch:
-
-```bash
-curl -fsSL -o mcdx_ql-0.1.0.crate \
-  https://raw.githubusercontent.com/nilpferdschaefer/mcdx-ql/binary/crates/mcdx_ql-0.1.0.crate
-```
-
-### Java: Maven from the binary branch
-
-```xml
-<repositories>
-  <repository>
-    <id>mcdx-ql-binary</id>
-    <url>https://raw.githubusercontent.com/nilpferdschaefer/mcdx-ql/binary/maven</url>
-  </repository>
-</repositories>
-
-<dependency>
-  <groupId>com.nilpferdschaefer</groupId>
-  <artifactId>mcdx-ql</artifactId>
-  <version>0.1.0</version>
-</dependency>
-```
+### Java API
 
 ```java
 import com.nilpferdschaefer.mcdxql.McdxQl;
@@ -214,6 +221,8 @@ Every CI run on `main` / PRs and every `v*.*.*` tag uploads
 | `mcdx_ql-<version>.crate` | `cargo package` output |
 | `docs/` | rustdoc HTML — open `docs/mcdx_ql/index.html` |
 | `java/mcdx-ql-<version>.jar` | Java bindings + embedded JNI lib |
+| `java/mcdx-ql-<version>-javadoc.jar` | Javadoc JAR |
+| `java/javadoc/` | Javadoc HTML |
 | `java/native/` | raw native libs |
 
 ```bash
@@ -225,9 +234,12 @@ java -cp mcdx_ql-0.1.0/java/mcdx-ql-0.1.0.jar com.nilpferdschaefer.mcdxql.SmokeT
 
 ### Docs site
 
-On push to `main` and on version tags, rustdoc is deployed to GitHub Pages:
+On push to `main` and on version tags, docs are deployed to GitHub Pages:
 
 https://nilpferdschaefer.github.io/mcdx-ql/
+
+- Rust: `/mcdx_ql/`
+- Java: `/javadoc/`
 
 Enable once under **Settings → Pages → Build and deployment → GitHub Actions** (private Pages requires an eligible GitHub plan).
 
@@ -236,7 +248,7 @@ Enable once under **Settings → Pages → Build and deployment → GitHub Actio
 1. Bump `version` in `Cargo.toml` (and keep `java/pom.xml` in sync — `build-jar.sh` patches it)
 2. Tag `vX.Y.Z` matching that version and push the tag
 3. `Release` workflow attaches the bundle + JAR to the GitHub Release and refreshes Pages
-4. `Publish binary repo` updates the `binary` branch Maven/crate tree for that version
+4. `Publish GitHub Packages` deploys immutable `com.nilpferdschaefer:mcdx-ql:X.Y.Z`
 
 ## Develop
 

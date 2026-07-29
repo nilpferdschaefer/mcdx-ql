@@ -12,10 +12,31 @@
   <description>Java bindings for mcdx_ql (indicator grammar → SQL)</description>
   <url>https://github.com/nilpferdschaefer/mcdx-ql</url>
 
+  <scm>
+    <url>https://github.com/nilpferdschaefer/mcdx-ql</url>
+    <connection>scm:git:https://github.com/nilpferdschaefer/mcdx-ql.git</connection>
+    <developerConnection>scm:git:https://github.com/nilpferdschaefer/mcdx-ql.git</developerConnection>
+  </scm>
+
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>21</maven.compiler.release>
+    <!-- Overridden in CI: https://maven.pkg.github.com/OWNER/REPO -->
+    <github.maven.repo>https://maven.pkg.github.com/nilpferdschaefer/mcdx-ql</github.maven.repo>
   </properties>
+
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>${github.maven.repo}</url>
+    </repository>
+    <snapshotRepository>
+      <id>github</id>
+      <name>GitHub Packages Snapshots</name>
+      <url>${github.maven.repo}</url>
+    </snapshotRepository>
+  </distributionManagement>
 
   <build>
     <resources>
@@ -41,6 +62,67 @@
           </archive>
         </configuration>
       </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.11.2</version>
+        <configuration>
+          <source>${maven.compiler.release}</source>
+          <encoding>UTF-8</encoding>
+          <doclint>all,-missing</doclint>
+          <quiet>true</quiet>
+          <show>protected</show>
+          <windowtitle>mcdx-ql ${project.version} API</windowtitle>
+          <doctitle>mcdx-ql ${project.version}</doctitle>
+        </configuration>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals>
+              <goal>jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
+
+  <!-- CI publish: mvn … -Dcrate.file=/path/to/mcdx_ql-X.Y.Z.crate -->
+  <profiles>
+    <profile>
+      <id>attach-crate</id>
+      <activation>
+        <property>
+          <name>crate.file</name>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>3.6.0</version>
+            <executions>
+              <execution>
+                <id>attach-rust-crate</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>attach-artifact</goal>
+                </goals>
+                <configuration>
+                  <artifacts>
+                    <artifact>
+                      <file>${crate.file}</file>
+                      <type>crate</type>
+                      <classifier>crate</classifier>
+                    </artifact>
+                  </artifacts>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
