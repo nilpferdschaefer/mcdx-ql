@@ -279,10 +279,9 @@ impl Codegen<'_> {
                         })?,
                     AssetRef::Row => unreachable!(),
                 };
-                // Market join aliases close as m_<sanitized>.close
-                let alias = sanitize_ident(&ticker);
+                let join = market_join_alias(&ticker, self.analysis.market_tickers.len());
                 match s.name.as_str() {
-                    "close" => format!("m_{alias}.close"),
+                    "close" => format!("{join}.close"),
                     other => {
                         return Err(Error::compile(
                             format!("@{ticker} currently only supports [close], not [{other}]"),
@@ -314,8 +313,8 @@ impl Codegen<'_> {
                 let value_sql = if is_row_close(&args[0]) {
                     "e.bar_ret".to_string()
                 } else if let Some(ticker) = market_close_ticker(&args[0], self.params) {
-                    let alias = sanitize_ident(&ticker);
-                    format!("m_{alias}.bar_ret")
+                    let join = market_join_alias(&ticker, self.analysis.market_tickers.len());
+                    format!("{join}.market_ret")
                 } else {
                     let series = self.gen_expr(&args[0])?;
                     format!(
@@ -332,7 +331,7 @@ impl Codegen<'_> {
                     version_sql: "e.version".into(),
                     warmup_sql: "TRUE".into(),
                     period: None,
-                    series_key: Some("close".into()),
+                    series_key: Some("ret".into()),
                 })
             }
             CallOp::Tr => {
@@ -392,26 +391,26 @@ impl Codegen<'_> {
                 Ok(Frag {
                     value_sql,
                     version_sql: "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)".into(),
-                    warmup_sql: format!("(cardinality(e.closes_to_date) >= {period})"),
+                    warmup_sql: format!("(array_length(e.closes_to_date, 1) >= {period})"),
                     period: Some(period),
                     series_key: Some("close".into()),
                 })
             }
             CallOp::Rma => {
                 let period = self.resolve_period(window, pos)?;
-                // RMA of TR(close) is the common form; if arg is TR(...), use closes path.
-                let value_sql = if is_tr_of_close(&args[0]) {
-                    rma_tr_sql("e.closes_to_date", period)
-                } else {
-                    let inner = self.gen_expr(&args[0])?;
-                    // Generic RMA over a scalar isn't array-based; fall back to window approx note.
-                    let _ = inner;
-                    rma_tr_sql("e.closes_to_date", period)
-                };
+                // RMA(TR(close)) → Wilder ATR over closes_to_date (analytics atrWilderSql).
+                if !is_tr_of_close(&args[0]) {
+                    let _ = self.gen_expr(&args[0])?;
+                    return Err(Error::compile(
+                        "RMA currently supports RMA(TR([close; …]), $period) only",
+                        self.expr_src,
+                    ));
+                }
+                let _ = self.gen_expr(&args[0])?;
                 Ok(Frag {
-                    value_sql,
+                    value_sql: rma_tr_sql("e.closes_to_date", period),
                     version_sql: "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)".into(),
-                    warmup_sql: format!("(cardinality(e.closes_to_date) >= {})", period + 1),
+                    warmup_sql: format!("(array_length(e.closes_to_date, 1) >= {})", period + 1),
                     period: Some(period),
                     series_key: Some("close".into()),
                 })
@@ -422,7 +421,7 @@ impl Codegen<'_> {
                 Ok(Frag {
                     value_sql: rsi_sql("e.closes_to_date", period),
                     version_sql: "MAX(e.version) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)".into(),
-                    warmup_sql: format!("(cardinality(e.closes_to_date) >= {})", period + 1),
+                    warmup_sql: format!("(array_length(e.closes_to_date, 1) >= {})", period + 1),
                     period: Some(period),
                     series_key: Some("close".into()),
                 })
@@ -612,98 +611,115 @@ fn eval_const(expr: &Expr, params: &BTreeMap<String, ParamValue>) -> Result<i64,
     }
 }
 
-/// Pure-SQL EMA seeded by SMA of the first `period` closes.
+/// Join alias for a market ticker. Single-ticker exprs use `m` (spec `market_ret`).
+fn market_join_alias(ticker: &str, market_count: usize) -> String {
+    if market_count <= 1 {
+        "m".to_string()
+    } else {
+        format!("m_{}", sanitize_ident(ticker))
+    }
+}
+
+fn market_cte_name(ticker: &str, market_count: usize) -> String {
+    if market_count <= 1 {
+        "market_ret".to_string()
+    } else {
+        format!("market_ret_{}", sanitize_ident(ticker))
+    }
+}
+
+/// Inception-SMA-seeded EMA over `C` (`emaCloseSql`).
 fn ema_sql(closes_arr: &str, period: i32) -> String {
-    let k = format!("(2.0 / ({} + 1))", period);
     format!(
-        "(CASE WHEN cardinality({arr}) < {period} THEN NULL ELSE (\n\
-           WITH RECURSIVE\n\
-           c AS (\n\
-             SELECT u.close::double precision AS close, u.ord::int AS i\n\
-             FROM unnest({arr}) WITH ORDINALITY AS u(close, ord)\n\
+        "(SELECT CASE WHEN array_length({arr}, 1) < {period} THEN NULL ELSE (\n\
+           WITH RECURSIVE vals AS (\n\
+             SELECT u.ord, u.c FROM unnest({arr}) WITH ORDINALITY AS u(c, ord)\n\
            ),\n\
-           seed AS (\n\
-             SELECT avg(close) AS v, {period}::int AS i FROM c WHERE i <= {period}\n\
-             HAVING count(*) = {period}\n\
-           ),\n\
-           r AS (\n\
-             SELECT v, i FROM seed\n\
+           seed AS (SELECT AVG(v.c) AS ema FROM vals v WHERE v.ord <= {period}),\n\
+           rec AS (\n\
+             SELECT {period}::bigint AS ord, s.ema FROM seed s\n\
              UNION ALL\n\
-             SELECT c.close * {k} + r.v * (1 - {k}), c.i\n\
-             FROM r JOIN c ON c.i = r.i + 1\n\
+             SELECT v.ord, v.c * (2.0/({period}+1.0)) + r.ema * (1.0 - (2.0/({period}+1.0)))\n\
+             FROM rec r JOIN vals v ON v.ord = r.ord + 1\n\
            )\n\
-           SELECT v FROM r ORDER BY i DESC LIMIT 1\n\
+           SELECT r.ema FROM rec r ORDER BY r.ord DESC LIMIT 1\n\
          ) END)",
         arr = closes_arr,
-        period = period,
-        k = k
+        period = period
     )
 }
 
-/// Wilder RMA of close-to-close true range (ATR-style).
+/// Wilder ATR: close-to-close TR over `C`, seed AVG(tr) for bars `2..period+1`.
 fn rma_tr_sql(closes_arr: &str, period: i32) -> String {
+    let seed_ord = period + 1;
     format!(
-        "(CASE WHEN cardinality({arr}) < {need} THEN NULL ELSE (\n\
-           WITH RECURSIVE\n\
-           c AS (\n\
-             SELECT u.close::double precision AS close, u.ord::int AS i\n\
-             FROM unnest({arr}) WITH ORDINALITY AS u(close, ord)\n\
+        "(SELECT CASE WHEN array_length({arr}, 1) < {need} THEN NULL ELSE (\n\
+           WITH RECURSIVE vals AS (\n\
+             SELECT u.ord, u.c::double precision AS c\n\
+             FROM unnest({arr}) WITH ORDINALITY AS u(c, ord)\n\
            ),\n\
            tr AS (\n\
-             SELECT c.i, ABS(c.close - p.close) AS tr\n\
-             FROM c JOIN c p ON p.i = c.i - 1\n\
+             SELECT v.ord, ABS(v.c - p.c) AS tr\n\
+             FROM vals v JOIN vals p ON p.ord = v.ord - 1\n\
+             WHERE v.ord >= 2\n\
            ),\n\
            seed AS (\n\
-             SELECT avg(tr) AS v, {period}::int AS i FROM tr WHERE i <= {period} + 1\n\
-             HAVING count(*) = {period}\n\
+             SELECT AVG(t.tr) AS atr\n\
+             FROM tr t WHERE t.ord BETWEEN 2 AND {seed_ord}\n\
            ),\n\
-           r AS (\n\
-             SELECT v, i FROM seed\n\
+           rec AS (\n\
+             SELECT {seed_ord}::bigint AS ord, s.atr FROM seed s\n\
              UNION ALL\n\
-             SELECT (r.v * ({period} - 1) + tr.tr) / {period}, tr.i\n\
-             FROM r JOIN tr ON tr.i = r.i + 1\n\
+             SELECT t.ord, (r.atr * ({period} - 1) + t.tr) / {period}\n\
+             FROM rec r JOIN tr t ON t.ord = r.ord + 1\n\
            )\n\
-           SELECT v FROM r ORDER BY i DESC LIMIT 1\n\
+           SELECT r.atr FROM rec r ORDER BY r.ord DESC LIMIT 1\n\
          ) END)",
         arr = closes_arr,
         period = period,
-        need = period + 1
+        need = period + 1,
+        seed_ord = seed_ord
     )
 }
 
+/// Wilder RSI over `C` (`rsiWilderSql`): `100 - 100/(1 + avg_gain/avg_loss)`.
 fn rsi_sql(closes_arr: &str, period: i32) -> String {
+    let seed_ord = period + 1;
     format!(
-        "(CASE WHEN cardinality({arr}) < {need} THEN NULL ELSE (\n\
-           WITH RECURSIVE\n\
-           c AS (\n\
-             SELECT u.close::double precision AS close, u.ord::int AS i\n\
-             FROM unnest({arr}) WITH ORDINALITY AS u(close, ord)\n\
+        "(SELECT CASE WHEN array_length({arr}, 1) < {need} THEN NULL ELSE (\n\
+           WITH RECURSIVE vals AS (\n\
+             SELECT u.ord, u.c::double precision AS c\n\
+             FROM unnest({arr}) WITH ORDINALITY AS u(c, ord)\n\
            ),\n\
            ch AS (\n\
-             SELECT c.i,\n\
-                    GREATEST(c.close - p.close, 0) AS gain,\n\
-                    GREATEST(p.close - c.close, 0) AS loss\n\
-             FROM c JOIN c p ON p.i = c.i - 1\n\
+             SELECT v.ord,\n\
+                    GREATEST(v.c - p.c, 0) AS gain,\n\
+                    GREATEST(p.c - v.c, 0) AS loss\n\
+             FROM vals v JOIN vals p ON p.ord = v.ord - 1\n\
+             WHERE v.ord >= 2\n\
            ),\n\
            seed AS (\n\
-             SELECT avg(gain) AS ag, avg(loss) AS al, {period}::int AS i\n\
-             FROM ch WHERE i <= {period} + 1\n\
-             HAVING count(*) = {period}\n\
+             SELECT AVG(c.gain) AS avg_gain, AVG(c.loss) AS avg_loss\n\
+             FROM ch c WHERE c.ord BETWEEN 2 AND {seed_ord}\n\
            ),\n\
-           r AS (\n\
-             SELECT ag, al, i FROM seed\n\
+           rec AS (\n\
+             SELECT {seed_ord}::bigint AS ord, s.avg_gain, s.avg_loss FROM seed s\n\
              UNION ALL\n\
-             SELECT (r.ag * ({period} - 1) + ch.gain) / {period},\n\
-                    (r.al * ({period} - 1) + ch.loss) / {period},\n\
-                    ch.i\n\
-             FROM r JOIN ch ON ch.i = r.i + 1\n\
+             SELECT c.ord,\n\
+                    (r.avg_gain * ({period} - 1) + c.gain) / {period},\n\
+                    (r.avg_loss * ({period} - 1) + c.loss) / {period}\n\
+             FROM rec r JOIN ch c ON c.ord = r.ord + 1\n\
            )\n\
-           SELECT CASE WHEN al = 0 THEN 100.0 ELSE 100.0 - (100.0 / (1.0 + (ag / NULLIF(al, 0)))) END\n\
-           FROM r ORDER BY i DESC LIMIT 1\n\
+           SELECT CASE\n\
+                    WHEN r.avg_loss = 0 THEN 100.0\n\
+                    ELSE 100.0 - (100.0 / (1.0 + (r.avg_gain / r.avg_loss)))\n\
+                  END\n\
+           FROM rec r ORDER BY r.ord DESC LIMIT 1\n\
          ) END)",
         arr = closes_arr,
         period = period,
-        need = period + 1
+        need = period + 1,
+        seed_ord = seed_ord
     )
 }
 
@@ -804,29 +820,37 @@ fn render_envelope(
     }
     writeln!(sql, "\n  FROM ordered o\n),").unwrap();
 
-    // optional market CTEs
+    // optional market CTEs (§4.3) — single ticker uses `market_ret` / `m.market_ret`
+    let market_count = scaffolds.market_tickers.len();
     for ticker in &scaffolds.market_tickers {
-        let alias = sanitize_ident(ticker);
+        let cte = market_cte_name(ticker, market_count);
         writeln!(
             sql,
-            "market_{alias} AS (\n\
-             \x20 SELECT c.timestamp_start,\n\
-             \x20        c.value AS close,\n\
-             \x20        CASE WHEN LAG(c.value) OVER (PARTITION BY c.asset ORDER BY c.timestamp_start) IS NULL\n\
-             \x20               OR LAG(c.value) OVER (PARTITION BY c.asset ORDER BY c.timestamp_start) <= 0\n\
-             \x20               OR c.value <= 0 THEN NULL\n\
-             \x20             WHEN ABS(c.value / LAG(c.value) OVER (PARTITION BY c.asset ORDER BY c.timestamp_start) - 1.0) > 5 THEN NULL\n\
-             \x20             ELSE c.value / LAG(c.value) OVER (PARTITION BY c.asset ORDER BY c.timestamp_start) - 1.0\n\
-             \x20        END AS bar_ret\n\
-             \x20 FROM core.data c\n\
-             \x20 JOIN core.mcdx_asset a ON a.id = c.asset\n\
-             \x20 CROSS JOIN params p\n\
-             \x20 WHERE c.data_type = 'close'\n\
-             \x20   AND c.reporting_period = '{reporting_period}'\n\
-             \x20   AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
-             \x20   AND a.canonical_ticker = '{ticker}'\n\
-             \x20   AND c.timestamp_start >= p.dirty_from - (p.max_lookback::bigint * {interval_ms})\n\
-             \x20   AND c.timestamp_start <= GREATEST(p.dirty_to, p.dirty_from)\n\
+            "{cte} AS (\n\
+             \x20 SELECT r.timestamp_start, r.close, r.bar_ret AS market_ret\n\
+             \x20 FROM (\n\
+             \x20   SELECT c.timestamp_start,\n\
+             \x20          c.value AS close,\n\
+             \x20          CASE WHEN LAG(c.value) OVER (\n\
+             \x20                     PARTITION BY c.asset ORDER BY c.timestamp_start) IS NULL\n\
+             \x20                 OR LAG(c.value) OVER (\n\
+             \x20                     PARTITION BY c.asset ORDER BY c.timestamp_start) <= 0\n\
+             \x20                 OR c.value <= 0\n\
+             \x20               THEN NULL\n\
+             \x20               ELSE c.value / LAG(c.value) OVER (\n\
+             \x20                     PARTITION BY c.asset ORDER BY c.timestamp_start) - 1.0\n\
+             \x20          END AS bar_ret\n\
+             \x20   FROM core.data c\n\
+             \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
+             \x20   CROSS JOIN params p\n\
+             \x20   WHERE c.data_type = 'close'\n\
+             \x20     AND c.reporting_period = '{reporting_period}'\n\
+             \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
+             \x20     AND a.canonical_ticker = '{ticker}'\n\
+             \x20     AND c.timestamp_start >= p.dirty_from - (p.max_lookback::bigint * {interval_ms})\n\
+             \x20     AND c.timestamp_start <= GREATEST(p.dirty_to, p.dirty_from)\n\
+             \x20 ) r\n\
+             \x20 WHERE r.bar_ret IS NOT NULL\n\
              ),"
         )
         .unwrap();
@@ -839,10 +863,11 @@ fn render_envelope(
     }
     write!(sql, "\n  FROM enriched e").unwrap();
     for ticker in &scaffolds.market_tickers {
-        let alias = sanitize_ident(ticker);
+        let cte = market_cte_name(ticker, market_count);
+        let join = market_join_alias(ticker, market_count);
         write!(
             sql,
-            "\n  LEFT JOIN market_{alias} m_{alias} ON m_{alias}.timestamp_start = e.timestamp_start"
+            "\n  LEFT JOIN {cte} {join} ON {join}.timestamp_start = e.timestamp_start"
         )
         .unwrap();
     }

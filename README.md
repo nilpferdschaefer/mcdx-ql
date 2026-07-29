@@ -56,23 +56,37 @@ let q = compile(&CompileRequest {
 | Form | Warmup |
 |------|--------|
 | Trailing `$period` | `COUNT(*) >= $period` |
-| `EMA(…, $period)` | `cardinality(closes_to_date) >= $period` |
-| `RMA(TR(…), $period)` / `RSI(…, $period)` | `cardinality(closes_to_date) >= $period+1` |
+| `EMA(…, $period)` | `array_length(closes_to_date, 1) >= $period` |
+| `RMA(TR(…), $period)` / `RSI(…, $period)` | `array_length(closes_to_date, 1) >= $period+1` |
 
 Version is `MAX(version)` over the same frame as the primary window (or `GREATEST` of frames for multi-window exprs).
+
+### Worked analytics stems (§4.5)
+
+| Stem | Expr |
+|------|------|
+| `sma_14` | `AVG([close; $from:$to], $period)` |
+| `vol_96` | `STD(RET([close; $from:$to]), $period) * SQRT($bars_per_year)` |
+| `ema_48` | `EMA([close; $from:$to], $period)` |
+| `atr_14` | `RMA(TR([close; $from:$to]), $period)` |
+| `rsi_14` | `RSI([close; $from:$to], $period)` |
+| `sep_atr` | `(AVG(…, $fast) - AVG(…, $slow)) / RMA(TR(…), $atr)` |
+| `beta_31` | `REGR_SLOPE(RET([close; …]), RET([close@$benchmark; …]), $period)` |
+
+`bb_14` (object mid/upper/lower) is deferred.
 
 ## Output shape
 
 `CompiledQuery` includes:
 
-- `sql` — shared CTE pipeline (`params` → `ordered` → `enriched` → optional `market_*` → `windowed` → `unpivoted` → `ranked`)
+- `sql` — shared CTE pipeline (`params` → `ordered` → `enriched` → optional `market_ret` → `windowed` → `unpivoted` → `ranked`)
 - `binds` — eight positional parameters matching the `params` CTE
 - `domain` — resolved `{from,to}` ms
 - `max_lookback` — drives `dirty_from - max_lookback * interval_ms` scan padding
 - `scaffolds` — which enriched columns / market CTEs were enabled
 - `indicators` — stem names for the `LATERAL VALUES` unpivot (`value` for single expr; batch keys otherwise)
 
-Result rows from SQL are `(coin, indicator, timestamp_start, timestamp_end, value, version, warmup_complete)`. Null computed values are filtered in SQL (`WHERE u.value IS NOT NULL`). Mapping onto the HTTP `rows[]` object (`asset`, scalar `value` xor `object`) is the read-api’s job.
+SQL columns → response fields (§4.6): `coin`→`asset`, plus `timestamp_*` / `value` / `version` / `warmup_complete`. Use `map_sql_row` for scalar-vs-object discrimination. Null computed values are filtered in SQL (`WHERE u.value IS NOT NULL`).
 
 ## Errors
 

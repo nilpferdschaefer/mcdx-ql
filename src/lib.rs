@@ -9,6 +9,7 @@ mod error;
 mod interval;
 mod lex;
 mod parse;
+mod result_map;
 mod sem;
 
 pub use ast::{AssetRef, BatchExpr, BinOp, CallOp, DomainBound, Expr, LookbackBound, Series};
@@ -19,6 +20,9 @@ pub use error::{Error, ErrorCode};
 pub use interval::{interval_ms, IntervalError};
 pub use lex::tokenize;
 pub use parse::{parse_batch, parse_expr};
+pub use result_map::{
+    map_sql_row, sql_columns, IndicatorComputeRow, MapRowError, SqlValue,
+};
 pub use sem::{analyze, Analysis, Domain, ParamValue};
 
 /// Fingerprint used for bare close bars (`params_hash` of empty params).

@@ -332,6 +332,13 @@ impl<'a> AnalyzeCtx<'a> {
                     return Err(Error::sem("RMA expects one argument plus period", self.expr_src, Some(pos)));
                 }
                 let period = self.window_period(window, pos)?;
+                if period < 2 {
+                    return Err(Error::sem(
+                        format!("RMA requires $period >= 2, got {period}"),
+                        self.expr_src,
+                        Some(pos),
+                    ));
+                }
                 // RMA(TR(...)) / ATR-style needs period+1 input bars
                 self.max_lookback = self.max_lookback.max(period + 1);
                 self.walk_expr(&args[0])?;
@@ -342,6 +349,13 @@ impl<'a> AnalyzeCtx<'a> {
                     return Err(Error::sem("RSI expects one series argument plus period", self.expr_src, Some(pos)));
                 }
                 let period = self.window_period(window, pos)?;
+                if period < 2 {
+                    return Err(Error::sem(
+                        format!("RSI requires $period >= 2, got {period}"),
+                        self.expr_src,
+                        Some(pos),
+                    ));
+                }
                 self.max_lookback = self.max_lookback.max(period + 1);
                 self.walk_expr(&args[0])?;
             }

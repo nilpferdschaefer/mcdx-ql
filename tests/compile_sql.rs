@@ -75,7 +75,31 @@ fn compiles_batch_shared_envelope() {
 fn compiles_rsi_warmup_period_plus_one() {
     let q = compile(&req("RSI([close; $from:$to], $period)")).unwrap();
     assert_eq!(q.max_lookback, 15);
-    assert!(q.sql.contains("cardinality(e.closes_to_date) >= 15"));
+    assert!(q.sql.contains("array_length(e.closes_to_date, 1) >= 15"));
+    assert!(q.sql.contains("100.0 - (100.0 / (1.0 + (r.avg_gain / r.avg_loss)))"));
+}
+
+#[test]
+fn compiles_ema_close_sql_shape() {
+    let q = compile(&req("EMA([close; $from:$to], $period)")).unwrap();
+    assert!(q.sql.contains("WITH RECURSIVE vals AS"));
+    assert!(q.sql.contains("array_length(e.closes_to_date, 1) < 14"));
+    assert!(q.sql.contains("2.0/(14+1.0)"));
+}
+
+#[test]
+fn compiles_atr_wilder_seed_bars() {
+    let q = compile(&req("RMA(TR([close; $from:$to]), $period)")).unwrap();
+    assert!(q.sql.contains("WHERE t.ord BETWEEN 2 AND 15"));
+    assert!(q.sql.contains("array_length(e.closes_to_date, 1) >= 15"));
+}
+
+#[test]
+fn compiles_std_of_ret() {
+    let q = compile(&req("STD(RET([close; $from:$to]), $period)")).unwrap();
+    assert!(q.scaffolds.bar_ret);
+    assert!(q.sql.contains("AVG(e.bar_ret * e.bar_ret) OVER w_ret_1d_14"));
+    assert!(q.sql.contains("SQRT(GREATEST(0,"));
 }
 
 #[test]
@@ -89,9 +113,11 @@ fn compiles_market_qualifier() {
         .scaffolds
         .market_tickers
         .contains(&"TOTALCRYPTOMARKETCAP".to_string()));
-    assert!(q.sql.contains("market_totalcryptomarketcap"));
-    assert!(q.sql.contains("m_totalcryptomarketcap.bar_ret"));
-    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m_totalcryptomarketcap.bar_ret)"));
+    assert!(q.sql.contains("market_ret AS ("));
+    assert!(q.sql.contains("r.bar_ret AS market_ret"));
+    assert!(q.sql.contains("WHERE r.bar_ret IS NOT NULL"));
+    assert!(q.sql.contains("LEFT JOIN market_ret m ON m.timestamp_start = e.timestamp_start"));
+    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m.market_ret)"));
 }
 
 #[test]
@@ -105,6 +131,46 @@ fn compiles_benchmark_param() {
         .market_tickers
         .iter()
         .any(|t| t == "TOTALCRYPTOMARKETCAP"));
+    assert!(q.sql.contains("m.market_ret"));
+}
+
+#[test]
+fn worked_mapping_vol_96() {
+    let mut r = req("STD(RET([close; $from:$to]), $period) * SQRT($bars_per_year)");
+    r.params.insert("period".into(), ParamValue::Int(96));
+    r.params
+        .insert("bars_per_year".into(), ParamValue::Int(365));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("SQRT(GREATEST(0,"));
+    assert!(q.sql.contains("e.bar_ret"));
+    assert!(q.sql.contains("SQRT(365)"));
+}
+
+#[test]
+fn worked_mapping_sep_atr() {
+    let mut r = req(
+        "(AVG([close; $from:$to], $fast) - AVG([close; $from:$to], $slow)) / RMA(TR([close; $from:$to]), $atr)",
+    );
+    r.params.insert("fast".into(), ParamValue::Int(5));
+    r.params.insert("slow".into(), ParamValue::Int(50));
+    r.params.insert("atr".into(), ParamValue::Int(14));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_5"));
+    assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_50"));
+    assert!(q.sql.contains("WITH RECURSIVE vals AS"));
+    assert_eq!(q.max_lookback, 50); // slow window dominates over atr+1=15
+}
+
+#[test]
+fn worked_mapping_beta_31() {
+    let mut r = req(
+        "REGR_SLOPE(RET([close; $from:$to]), RET([close@$benchmark; $from:$to]), $period)",
+    );
+    r.params.insert("period".into(), ParamValue::Int(31));
+    r.params
+        .insert("benchmark".into(), ParamValue::Text("TOTALCRYPTOMARKETCAP".into()));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m.market_ret) OVER w_regr_1d_31"));
 }
 
 #[test]
@@ -128,6 +194,14 @@ fn rejects_missing_param() {
 fn rejects_bare_identifier() {
     let err = compile(&req("AVG(close, $period)")).unwrap_err();
     assert_eq!(err.code.as_str(), "parse_error");
+}
+
+#[test]
+fn rejects_rsi_period_lt_2() {
+    let mut r = req("RSI([close; $from:$to], $period)");
+    r.params.insert("period".into(), ParamValue::Int(1));
+    let err = compile(&r).unwrap_err();
+    assert!(err.message.contains("RSI requires $period >= 2"));
 }
 
 #[test]
