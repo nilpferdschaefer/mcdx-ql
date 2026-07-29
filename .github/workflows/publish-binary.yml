@@ -134,6 +134,6 @@ jobs:
             echo "- Version: \`${VERSION}\`"
             echo "- Maven: \`https://raw.githubusercontent.com/${{ github.repository }}/${BINARY_BRANCH}/maven\`"
             echo "- Crate: \`https://raw.githubusercontent.com/${{ github.repository }}/${BINARY_BRANCH}/crates/mcdx_ql-${VERSION}.crate\`"
-            echo "- Javadoc: [\`javadoc/latest/\`](${{ github.server_url }}/${{ github.repository }}/tree/${BINARY_BRANCH}/javadoc/latest)"
+            echo "- Javadoc: [\`javadoc/\`](${{ github.server_url }}/${{ github.repository }}/tree/${BINARY_BRANCH}/javadoc)"
             echo "- Bundle: \`https://raw.githubusercontent.com/${{ github.repository }}/${BINARY_BRANCH}/bundles/mcdx_ql-${VERSION}-bundle.tar.gz\`"
           } >> "$GITHUB_STEP_SUMMARY"

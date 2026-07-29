@@ -5,6 +5,8 @@
 #   bundles/ — full dist bundle tarball
 #   javadoc/ — Javadoc HTML site
 #
+# Dev mode: each publish *replaces* the previous tree (no version history retained).
+#
 # Usage:
 #   ./scripts/package-bundle.sh          # build artifacts first
 #   ./scripts/publish-binary-repo.sh DEST
@@ -47,6 +49,12 @@ if [[ ! -f "${JAVADOC_HTML_SRC}/index.html" ]]; then
   exit 1
 fi
 
+# Wipe prior published trees so we only keep the current overwrite.
+rm -rf \
+  "${DEST}/maven" \
+  "${DEST}/crates" \
+  "${DEST}/bundles" \
+  "${DEST}/javadoc"
 mkdir -p \
   "${DEST}/maven/${GROUP_PATH}/${ARTIFACT}/${VERSION}" \
   "${DEST}/crates" \
@@ -61,23 +69,8 @@ sha256sum "${CRATE_SRC}" | awk '{print $1}' > "${DEST}/crates/${CRATE_NAME}-${VE
 cp -f "${BUNDLE_SRC}" "${DEST}/bundles/"
 sha256sum "${BUNDLE_SRC}" | awk '{print $1}' > "${DEST}/bundles/${CRATE_NAME}-${VERSION}-bundle.tar.gz.sha256"
 
-# --- javadoc HTML (latest overwrite; versioned copy kept under javadoc/<ver>/) ---
-rm -rf "${DEST}/javadoc/latest" "${DEST}/javadoc/${VERSION}"
-mkdir -p "${DEST}/javadoc/latest" "${DEST}/javadoc/${VERSION}"
-cp -a "${JAVADOC_HTML_SRC}/." "${DEST}/javadoc/latest/"
-cp -a "${JAVADOC_HTML_SRC}/." "${DEST}/javadoc/${VERSION}/"
-cat > "${DEST}/javadoc/index.html" <<EOF
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta http-equiv="refresh" content="0; url=latest/index.html">
-  <title>mcdx-ql Javadoc</title>
-  <link rel="canonical" href="latest/index.html">
-</head>
-<body><p><a href="latest/index.html">mcdx-ql ${VERSION} Javadoc</a></p></body>
-</html>
-EOF
+# --- javadoc HTML (overwrite in place) ---
+cp -a "${JAVADOC_HTML_SRC}/." "${DEST}/javadoc/"
 
 # --- maven artifact ---
 MAVEN_DIR="${DEST}/maven/${GROUP_PATH}/${ARTIFACT}/${VERSION}"
@@ -95,50 +88,19 @@ checksums "${MAVEN_DIR}/${ARTIFACT}-${VERSION}.jar"
 checksums "${MAVEN_DIR}/${ARTIFACT}-${VERSION}-javadoc.jar"
 checksums "${MAVEN_DIR}/${ARTIFACT}-${VERSION}.pom"
 
-# --- maven-metadata.xml (merge versions) ---
+# --- maven-metadata.xml (current version only) ---
 META="${DEST}/maven/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml"
-EXISTING_VERSIONS=()
-if [[ -f "${META}" ]]; then
-  while IFS= read -r v; do
-    [[ -n "${v}" ]] && EXISTING_VERSIONS+=("${v}")
-  done < <(python3 - <<'PY' "${META}"
-import sys, re
-text = open(sys.argv[1]).read()
-print("\n".join(re.findall(r"<version>([^<]+)</version>", text)))
-PY
-)
-fi
-
-# unique, sorted (version-ish lexical; fine for semver X.Y.Z)
-ALL_VERSIONS=()
-seen=()
-for v in "${EXISTING_VERSIONS[@]}" "${VERSION}"; do
-  skip=0
-  for s in "${seen[@]+"${seen[@]}"}"; do
-    if [[ "${s}" == "${v}" ]]; then skip=1; break; fi
-  done
-  if [[ "${skip}" -eq 0 ]]; then
-    seen+=("${v}")
-    ALL_VERSIONS+=("${v}")
-  fi
-done
-IFS=$'\n' ALL_VERSIONS=($(printf '%s\n' "${ALL_VERSIONS[@]}" | sort -V))
-unset IFS
-LATEST="${ALL_VERSIONS[-1]}"
 UPDATED="$(date -u +%Y%m%d%H%M%S)"
-
 {
   echo '<?xml version="1.0" encoding="UTF-8"?>'
   echo '<metadata>'
   echo '  <groupId>com.nilpferdschaefer</groupId>'
   echo "  <artifactId>${ARTIFACT}</artifactId>"
   echo '  <versioning>'
-  echo "    <latest>${LATEST}</latest>"
-  echo "    <release>${LATEST}</release>"
+  echo "    <latest>${VERSION}</latest>"
+  echo "    <release>${VERSION}</release>"
   echo '    <versions>'
-  for v in "${ALL_VERSIONS[@]}"; do
-    echo "      <version>${v}</version>"
-  done
+  echo "      <version>${VERSION}</version>"
   echo '    </versions>'
   echo "    <lastUpdated>${UPDATED}</lastUpdated>"
   echo '  </versioning>'
@@ -164,12 +126,13 @@ javadoc_jars = sorted(
 bundles = sorted(p.name for p in (dest / "bundles").glob("*.tar.gz"))
 index = {
     "package": "mcdx_ql",
+    "mode": "dev-overwrite",
     "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "latest": "${VERSION}",
+    "version": "${VERSION}",
     "crates": crates,
     "maven_jars": jars,
     "javadoc_jars": javadoc_jars,
-    "javadoc_html": "javadoc/latest/index.html",
+    "javadoc_html": "javadoc/index.html",
     "bundles": bundles,
 }
 (dest / "index.json").write_text(json.dumps(index, indent=2) + "\n")
@@ -178,24 +141,23 @@ PY
 cat > "${DEST}/README.md" <<EOF
 # mcdx-ql binary repository
 
-Versioned **Rust \`.crate\`** and **Java Maven** artifacts published by CI into this
-[\`binary\`](https://github.com/nilpferdschaefer/mcdx-ql/tree/binary) branch.
+**Dev mode:** each CI publish overwrites this branch in place (no version history).
 
-Latest published from source: **${VERSION}**
+Current artifacts from source version **${VERSION}**.
 
 ## Layout
 
 | Path | Contents |
 |------|----------|
 | \`crates/mcdx_ql-*.crate\` | \`cargo package\` output |
-| \`maven/com/nilpferdschaefer/mcdx-ql/\` | Maven2 repo (JAR + javadoc JAR + POM + metadata) |
-| \`javadoc/\` | Javadoc HTML (\`javadoc/latest/\`, \`javadoc/<ver>/\`) |
+| \`maven/com/nilpferdschaefer/mcdx-ql/\` | Maven2 repo (JAR + javadoc JAR + POM) |
+| \`javadoc/\` | Javadoc HTML |
 | \`bundles/mcdx_ql-*-bundle.tar.gz\` | crate + rustdoc + JAR + javadoc |
 
 ## Javadoc
 
-- HTML: https://raw.githubusercontent.com/nilpferdschaefer/mcdx-ql/binary/javadoc/latest/index.html
-  (browse via the GitHub UI under \`javadoc/latest/\`, or the GitHub Pages site)
+- Branch: [\`javadoc/\`](https://github.com/nilpferdschaefer/mcdx-ql/tree/binary/javadoc)
+- Pages: https://nilpferdschaefer.github.io/mcdx-ql/javadoc/
 - Maven classifier: \`mcdx-ql-${VERSION}-javadoc.jar\`
 
 ## Java (Maven / Gradle)
@@ -226,22 +188,18 @@ dependencies {
 }
 \`\`\`
 
-Private repos need a credential that can read this repository (same as any other
-raw GitHub content fetch).
-
 ## Rust
 
-Prefer a git dependency on a tag / \`main\`. To consume the packed crate from this
-branch (offline / vendoring):
+Prefer a git dependency on \`main\`. Packed crate (overwritten each publish):
 
 \`\`\`bash
 curl -fsSL -o mcdx_ql-${VERSION}.crate \\
   https://raw.githubusercontent.com/nilpferdschaefer/mcdx-ql/binary/crates/mcdx_ql-${VERSION}.crate
-# unpack / vendor as needed
 \`\`\`
 
-See also \`index.json\` for the published file list.
+See also \`index.json\`.
 EOF
 
-echo "published ${VERSION} → ${DEST}"
+echo "published ${VERSION} → ${DEST} (dev overwrite)"
 ls -la "${DEST}/crates/" "${DEST}/bundles/" "${MAVEN_DIR}/"
+test -f "${DEST}/javadoc/index.html"

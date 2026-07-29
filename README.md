@@ -138,13 +138,13 @@ This crate is **not** published to crates.io. Sibling private repos should depen
 
 ### Binary repo (`binary` branch)
 
-On every push to `main`, on `v*.*.*` tags, and via workflow_dispatch, [Publish binary repo](.github/workflows/publish-binary.yml) builds the crate + JAR and commits them to the [`binary`](https://github.com/nilpferdschaefer/mcdx-ql/tree/binary) branch:
+On every push to `main`, on `v*.*.*` tags, and via workflow_dispatch, [Publish binary repo](.github/workflows/publish-binary.yml) builds the crate + JAR and **overwrites** the [`binary`](https://github.com/nilpferdschaefer/mcdx-ql/tree/binary) branch in place (dev mode — no retained version history):
 
 | Path | Contents |
 |------|----------|
 | `crates/mcdx_ql-<ver>.crate` | `cargo package` output |
 | `maven/com/nilpferdschaefer/mcdx-ql/` | Maven2 layout (JAR + javadoc JAR + POM + metadata) |
-| `javadoc/` | Javadoc HTML (`latest/` + versioned) |
+| `javadoc/` | Javadoc HTML (overwritten each publish) |
 | `bundles/mcdx_ql-<ver>-bundle.tar.gz` | crate + rustdoc + JAR + javadoc |
 | `index.json` | published file listing |
 
@@ -235,7 +235,7 @@ https://nilpferdschaefer.github.io/mcdx-ql/
 - Rust: `/mcdx_ql/`
 - Java: `/javadoc/`
 
-Javadoc HTML is also on the `binary` branch under `javadoc/latest/`.
+Javadoc HTML is also on the `binary` branch under `javadoc/` (overwritten each publish while in dev).
 
 Enable once under **Settings → Pages → Build and deployment → GitHub Actions** (private Pages requires an eligible GitHub plan).
 
