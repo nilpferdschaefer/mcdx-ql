@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build release bundle
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bundle.outputs.version }}
+      tag: ${{ steps.bundle.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Maven
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('java/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Verify tag + build bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
+          EXPECTED="v${VERSION}"
+          if [[ "${TAG}" != "${EXPECTED}" ]]; then
+            echo "Tag ${TAG} does not match Cargo.toml version ${EXPECTED}" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          cargo test
+          cargo test --features jni
+          chmod +x scripts/*.sh
+          ./scripts/package-bundle.sh
+
+          mkdir -p _site
+          cp -a target/doc/. _site/
+          cat > _site/index.html <<HTML
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=mcdx_ql/index.html">
+            <title>mcdx_ql docs</title>
+            <link rel="canonical" href="mcdx_ql/index.html">
+          </head>
+          <body><p><a href="mcdx_ql/index.html">mcdx_ql documentation</a></p></body>
+          </html>
+          HTML
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx_ql-${{ steps.bundle.outputs.version }}-bundle
+          path: |
+            dist/mcdx_ql-${{ steps.bundle.outputs.version }}-bundle.tar.gz
+            java/target/mcdx-ql-${{ steps.bundle.outputs.version }}.jar
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bundle.outputs.tag }}
+          name: mcdx_ql ${{ steps.bundle.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/mcdx_ql-${{ steps.bundle.outputs.version }}-bundle.tar.gz
+            java/target/mcdx-ql-${{ steps.bundle.outputs.version }}.jar
+          body: |
+            ## Rust
+
+            ```toml
+            [dependencies]
+            mcdx_ql = { git = "https://github.com/nilpferdschaefer/mcdx-ql", tag = "${{ steps.bundle.outputs.tag }}" }
+            ```
+
+            ## Java
+
+            Download `mcdx-ql-*.jar` (JNI native lib embedded for linux-x86_64 from CI) or unpack the bundle:
+
+            ```java
+            String json = com.nilpferdschaefer.mcdxql.McdxQl.compile("""
+              {"expr":"AVG([close.1d], 14)","assets":["BTC"],"params":{"period":14}}
+              """);
+            ```
+
+            **Artifacts**
+            - `mcdx_ql-*-bundle.tar.gz` — `.crate` + rustdoc + JAR + natives
+            - `mcdx-ql-*.jar` — Java bindings alone
+
+  deploy-docs:
+    name: deploy rustdoc to GitHub Pages
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

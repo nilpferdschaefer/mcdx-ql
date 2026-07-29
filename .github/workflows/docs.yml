@@ -1,0 +1,95 @@
+name: Deploy docs (main)
+
+# Keeps Pages docs fresh on every main merge without a version tag.
+# Also refreshes the crate+docs+JAR bundle artifact.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Maven
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('java/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Build rustdoc + crate + JAR bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          ./scripts/package-bundle.sh
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          mkdir -p _site
+          cp -a target/doc/. _site/
+          cat > _site/index.html <<HTML
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=mcdx_ql/index.html">
+            <title>mcdx_ql docs</title>
+          </head>
+          <body><p><a href="mcdx_ql/index.html">mcdx_ql documentation</a></p></body>
+          </html>
+          HTML
+
+      - name: Upload local artifact (crate + docs + JAR)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx_ql-${{ steps.bundle.outputs.version }}-bundle
+          path: dist/mcdx_ql-${{ steps.bundle.outputs.version }}-bundle.tar.gz
+          retention-days: 90
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx-ql-${{ steps.bundle.outputs.version }}-jar
+          path: java/target/mcdx-ql-${{ steps.bundle.outputs.version }}.jar
+          retention-days: 90
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

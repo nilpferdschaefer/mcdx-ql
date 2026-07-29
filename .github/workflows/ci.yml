@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: test / clippy / docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rust-docs
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets --features jni -- -D warnings
+
+      - name: Test
+        run: |
+          cargo test
+          cargo test --features jni
+
+      - name: Rustdoc
+        run: cargo doc --no-deps --document-private-items
+
+  package:
+    name: package crate + docs + JAR
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Maven
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('java/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Build bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          ./scripts/package-bundle.sh
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mcdx_ql") | .version')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload local artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx_ql-${{ steps.bundle.outputs.version }}-bundle
+          path: dist/mcdx_ql-${{ steps.bundle.outputs.version }}-bundle.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcdx-ql-${{ steps.bundle.outputs.version }}-jar
+          path: java/target/mcdx-ql-${{ steps.bundle.outputs.version }}.jar
+          if-no-files-found: error
+          retention-days: 90

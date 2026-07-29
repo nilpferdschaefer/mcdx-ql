@@ -1,0 +1,296 @@
+//! End-to-end compile tests for grammar → SQL.
+
+use std::collections::BTreeMap;
+
+use mcdx_ql::{compile, BindValue, CompileRequest, Domain, ParamValue};
+use pretty_assertions::assert_eq;
+
+fn base_params() -> BTreeMap<String, ParamValue> {
+    BTreeMap::from([
+        ("period".into(), ParamValue::Int(14)),
+        ("from".into(), ParamValue::Int(1_700_000_000_000)),
+        ("to".into(), ParamValue::Int(1_700_086_400_000)),
+    ])
+}
+
+fn req(expr: &str) -> CompileRequest {
+    CompileRequest {
+        expr: expr.to_string(),
+        reporting_period: None,
+        assets: vec!["BTC".into(), "ETH".into()],
+        params: base_params(),
+        after_ts: -1,
+        limit: 16,
+        publish_from: None,
+    }
+}
+
+#[test]
+fn compiles_avg_trailing_sugar() {
+    let q = compile(&req("AVG([close.1d; $from:$to], $period)")).unwrap();
+    assert_eq!(q.max_lookback, 14);
+    assert_eq!(q.reporting_period, "1d");
+    assert_eq!(
+        q.domain,
+        Domain::Absolute {
+            from_param: "from".into(),
+            to_param: "to".into(),
+            from_ms: 1_700_000_000_000,
+            to_ms: 1_700_086_400_000,
+        }
+    );
+    assert_eq!(q.interval_ms, 86_400_000);
+    assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_14"));
+    assert!(q.sql.contains("bounds AS ("));
+    assert!(q.sql.contains("p.dirty_from AS emit_from"));
+    assert!(q.sql.contains("p.dirty_to AS emit_to"));
+    assert_eq!(q.binds[1], BindValue::BigInt(1_700_000_000_000));
+    assert_eq!(q.binds[2], BindValue::BigInt(1_700_086_400_000));
+}
+
+#[test]
+fn full_domain_omitted() {
+    let q = compile(&req("AVG([close.1d], $period)")).unwrap();
+    assert_eq!(q.domain, Domain::Full);
+    assert_eq!(q.binds[1], BindValue::Null);
+    assert_eq!(q.binds[2], BindValue::Null);
+    assert!(q.sql.contains("l.min_ts AS emit_from"));
+    assert!(q.sql.contains("l.max_ts AS emit_to"));
+    assert!(q.sql.contains("b.emit_from"));
+    assert!(q.sql.contains("b.emit_to"));
+}
+
+#[test]
+fn last_result_slice() {
+    let q = compile(&req("AVG([close.1d], $period)[-1]")).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::TrailingLatest {
+            bars: 1,
+            end_offset: 0
+        }
+    );
+    assert!(q.sql.contains("l.max_ts - 0 AS emit_to") || q.sql.contains("l.max_ts AS emit_to"));
+    // emit_from = max - 0 for 1 bar
+    assert!(q.sql.contains("(l.max_ts - 0) - 0 AS emit_from") || q.sql.contains("AS emit_from"));
+}
+
+#[test]
+fn trailing_result_slice() {
+    let q = compile(&req("AVG([close.1d], 14)[-10:-1]")).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::TrailingLatest {
+            bars: 10,
+            end_offset: 0
+        }
+    );
+    assert!(q.sql.contains(&format!("(l.max_ts - 0) - {}", 9_i64 * 86_400_000)));
+}
+
+#[test]
+fn positive_result_index() {
+    let q = compile(&req("AVG([close.1d], 14)[4]")).unwrap();
+    assert_eq!(q.domain, Domain::FromStart { start: 4, count: 1 });
+    assert!(q.sql.contains("p.max_lookback::bigint + 4::bigint - 2"));
+}
+
+#[test]
+fn trailing_bars_ending_at_date() {
+    // 100 daily bars ending 2026-05-15 UTC (bar open ms)
+    let end = 1_778_803_200_000_i64;
+    let mut r = req(
+        "REGR_SLOPE(RET([close.1d; 100@$end]), RET([close.1d@$b; 100@$end]), $period)",
+    );
+    r.params.insert("end".into(), ParamValue::Int(end));
+    r.params.insert("b".into(), ParamValue::Text("ETH".into()));
+    r.params.insert("period".into(), ParamValue::Int(31));
+    let q = compile(&r).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::Absolute {
+            from_param: "end-(100-1)*interval".into(),
+            to_param: "end".into(),
+            from_ms: end - 99 * 86_400_000,
+            to_ms: end,
+        }
+    );
+    assert_eq!(q.binds[1], BindValue::BigInt(end - 99 * 86_400_000));
+    assert_eq!(q.binds[2], BindValue::BigInt(end));
+    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m.market_ret)"));
+    // One joint query emits the whole 100-bar range (paginated by limit).
+    assert_eq!(q.indicators, vec!["value".to_string()]);
+}
+
+#[test]
+fn trailing_bars_ending_latest() {
+    let q = compile(&req("AVG([close.1d; 100@latest], $period)")).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::TrailingLatest {
+            bars: 100,
+            end_offset: 0
+        }
+    );
+    assert_eq!(q.binds[1], BindValue::Null);
+    assert_eq!(q.binds[2], BindValue::Null);
+    assert!(q.sql.contains(&format!("(l.max_ts - 0) - {}", 99_i64 * 86_400_000)));
+}
+
+#[test]
+fn bucket_1h() {
+    let q = compile(&req("AVG([close.1h; $from:$to], $period)")).unwrap();
+    assert_eq!(q.reporting_period, "1h");
+    assert_eq!(q.interval_ms, 3_600_000);
+    assert!(q.sql.contains("w_close_1h_14"));
+    assert!(q.sql.contains("reporting_period = '1h'"));
+}
+
+#[test]
+fn rejects_missing_bucket() {
+    let err = compile(&req("AVG([close; $from:$to], $period)")).unwrap_err();
+    assert!(err.message.contains("bucket required"));
+}
+
+#[test]
+fn rejects_request_period_mismatch() {
+    let mut r = req("AVG([close.1d; $from:$to], $period)");
+    r.reporting_period = Some("1h".into());
+    let err = compile(&r).unwrap_err();
+    assert!(err.message.contains("conflicts"));
+}
+
+#[test]
+fn avg_explicit_lookback_matches_sugar() {
+    let sugar = compile(&req("AVG([close.1d; $from:$to], $period)")).unwrap();
+    let explicit = compile(&req("AVG([close.1d; $from:$to], t-($period-1), t)")).unwrap();
+    assert!(explicit.sql.contains("AVG(e.close) OVER w_close_1d_14"));
+    assert_eq!(sugar.max_lookback, explicit.max_lookback);
+}
+
+#[test]
+fn compiles_batch_shared_envelope() {
+    let q = compile(&req(
+        "{ sma_14: AVG([close.1d; $from:$to], 14), ema_14: EMA([close.1d; $from:$to], 14) }",
+    ))
+    .unwrap();
+    assert_eq!(q.indicators, vec!["ema_14".to_string(), "sma_14".to_string()]);
+    assert!(q.sql.contains("('ema_14', v_0, ver_0, w_0)"));
+    assert!(q.sql.contains("('sma_14', v_1, ver_1, w_1)"));
+    assert!(q.scaffolds.closes_to_date);
+}
+
+#[test]
+fn compiles_rsi_warmup_period_plus_one() {
+    let q = compile(&req("RSI([close.1d; $from:$to], $period)")).unwrap();
+    assert_eq!(q.max_lookback, 15);
+    assert!(q.sql.contains("array_length(e.closes_to_date, 1) >= 15"));
+}
+
+#[test]
+fn compiles_ema_close_sql_shape() {
+    let q = compile(&req("EMA([close.1d; $from:$to], $period)")).unwrap();
+    assert!(q.sql.contains("WITH RECURSIVE vals AS"));
+    assert!(q.sql.contains("array_length(e.closes_to_date, 1) < 14"));
+}
+
+#[test]
+fn compiles_atr_wilder_seed_bars() {
+    let q = compile(&req("RMA(TR([close.1d; $from:$to]), $period)")).unwrap();
+    assert!(q.sql.contains("WHERE t.ord BETWEEN 2 AND 15"));
+}
+
+#[test]
+fn compiles_std_of_ret() {
+    let q = compile(&req("STD(RET([close.1d; $from:$to]), $period)")).unwrap();
+    assert!(q.scaffolds.bar_ret);
+    assert!(q.sql.contains("AVG(e.bar_ret * e.bar_ret) OVER w_ret_1d_14"));
+}
+
+#[test]
+fn compiles_market_qualifier() {
+    let q = compile(&req(
+        "REGR_SLOPE(RET([close.1d; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
+    ))
+    .unwrap();
+    assert!(q.sql.contains("market_ret AS ("));
+    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m.market_ret)"));
+}
+
+#[test]
+fn compiles_benchmark_param() {
+    let mut r = req("RET([close.1d@$benchmark; $from:$to])");
+    r.params
+        .insert("benchmark".into(), ParamValue::Text("TOTALCRYPTOMARKETCAP".into()));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("m.market_ret"));
+}
+
+#[test]
+fn worked_mapping_vol_96() {
+    let mut r = req("STD(RET([close.1d; $from:$to]), $period) * SQRT($bars_per_year)");
+    r.params.insert("period".into(), ParamValue::Int(96));
+    r.params
+        .insert("bars_per_year".into(), ParamValue::Int(365));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("SQRT(365)"));
+}
+
+#[test]
+fn worked_mapping_sep_atr() {
+    let mut r = req(
+        "(AVG([close.1d; $from:$to], $fast) - AVG([close.1d; $from:$to], $slow)) / RMA(TR([close.1d; $from:$to]), $atr)",
+    );
+    r.params.insert("fast".into(), ParamValue::Int(5));
+    r.params.insert("slow".into(), ParamValue::Int(50));
+    r.params.insert("atr".into(), ParamValue::Int(14));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_5"));
+    assert_eq!(q.max_lookback, 50);
+}
+
+#[test]
+fn worked_mapping_beta_31() {
+    let mut r = req(
+        "REGR_SLOPE(RET([close.1d; $from:$to]), RET([close.1d@$benchmark; $from:$to]), $period)",
+    );
+    r.params.insert("period".into(), ParamValue::Int(31));
+    r.params
+        .insert("benchmark".into(), ParamValue::Text("TOTALCRYPTOMARKETCAP".into()));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m.market_ret) OVER w_regr_1d_31"));
+}
+
+#[test]
+fn rejects_unknown_series() {
+    let err = compile(&req("AVG([cloze.1d; $from:$to], $period)")).unwrap_err();
+    assert!(err.message.contains("unknown series [cloze]"));
+}
+
+#[test]
+fn rejects_missing_param() {
+    let mut r = req("AVG([close.1d; $from:$to], $period)");
+    r.params.remove("period");
+    let err = compile(&r).unwrap_err();
+    assert!(err.message.contains("missing param `$period`"));
+}
+
+#[test]
+fn rejects_bare_identifier() {
+    let err = compile(&req("AVG(close, $period)")).unwrap_err();
+    assert_eq!(err.code.as_str(), "parse_error");
+}
+
+#[test]
+fn rejects_rsi_period_lt_2() {
+    let mut r = req("RSI([close.1d; $from:$to], $period)");
+    r.params.insert("period".into(), ParamValue::Int(1));
+    let err = compile(&r).unwrap_err();
+    assert!(err.message.contains("RSI requires $period >= 2"));
+}
+
+#[test]
+fn var_and_std_fragments() {
+    let q = compile(&req("STD([close.1d; $from:$to], $period)")).unwrap();
+    assert!(q.sql.contains("AVG(e.close * e.close) OVER w_close_1d_14"));
+}

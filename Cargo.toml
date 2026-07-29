@@ -1,0 +1,30 @@
+[package]
+name = "mcdx_ql"
+version = "0.1.0"
+edition = "2021"
+description = "Compile indicator expression grammar to joint analytics SQL"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/nilpferdschaefer/mcdx-ql"
+documentation = "https://nilpferdschaefer.github.io/mcdx-ql/mcdx_ql/"
+keywords = ["sql", "grammar", "indicators", "mcdx"]
+categories = ["parser-implementations", "parsing"]
+exclude = ["dist", "java/target", "target"]
+
+[lib]
+name = "mcdx_ql"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# Build the JNI cdylib entrypoint used by the Java JAR.
+jni = ["dep:jni"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+jni = { version = "0.21", optional = true }
+
+[dev-dependencies]
+pretty_assertions = "1"

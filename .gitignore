@@ -1,0 +1,4 @@
+/target
+/dist
+/java/target/
+/java/src/main/resources/native/
