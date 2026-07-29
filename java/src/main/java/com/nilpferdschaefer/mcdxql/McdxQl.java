@@ -11,13 +11,12 @@ import java.util.Objects;
  * <p>Request/response are JSON (see crate {@code compile_json} / README). Example:
  *
  * <pre>{@code
- * String response = McdxQl.compile("""
- *   {
- *     "expr": "AVG([close.1d; $from:$to], $period)",
- *     "assets": ["BTC", "ETH"],
- *     "params": {"period": 14, "from": 1700000000000, "to": 1700086400000}
- *   }
- *   """);
+ * String response = McdxQl.compile(
+ *     "{"
+ *         + "\"expr\":\"AVG([close.1d; $from:$to], $period)\","
+ *         + "\"assets\":[\"BTC\",\"ETH\"],"
+ *         + "\"params\":{\"period\":14,\"from\":1700000000000,\"to\":1700086400000}"
+ *         + "}");
  * }</pre>
  */
 public final class McdxQl {
@@ -30,7 +29,7 @@ public final class McdxQl {
   /**
    * Compile an indicator expression request.
    *
-   * @param requestJson JSON object with {@code expr}, {@code assets}, {@code params}, …
+   * @param requestJson JSON object with {@code expr}, {@code assets}, {@code params}, etc.
    * @return JSON envelope {@code {"ok":true,...}} or {@code {"ok":false,"error":{...}}}
    */
   public static String compile(String requestJson) {

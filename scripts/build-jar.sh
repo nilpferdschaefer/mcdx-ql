@@ -63,7 +63,7 @@ else
   JAVA_OUT="java/target/classes"
   mkdir -p "${JAVA_OUT}"
   find java/src/main/java -name '*.java' > /tmp/mcdx_ql_sources.txt
-  javac --release 21 -d "${JAVA_OUT}" @"/tmp/mcdx_ql_sources.txt"
+  javac --release 11 -d "${JAVA_OUT}" @"/tmp/mcdx_ql_sources.txt"
   mkdir -p java/target
   JAR_PATH="java/target/mcdx-ql-${VERSION}.jar"
   jar cf "${JAR_PATH}" -C "${JAVA_OUT}" .
@@ -72,7 +72,7 @@ else
 
   JAVADOC_OUT="java/target/reports/apidocs"
   mkdir -p "${JAVADOC_OUT}"
-  javadoc --release 21 -d "${JAVADOC_OUT}" -quiet \
+  javadoc --release 11 -d "${JAVADOC_OUT}" -quiet \
     -windowtitle "mcdx-ql ${VERSION} API" \
     -doctitle "mcdx-ql ${VERSION}" \
     @"/tmp/mcdx_ql_sources.txt"

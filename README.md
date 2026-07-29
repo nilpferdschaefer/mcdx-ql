@@ -202,7 +202,7 @@ String response = McdxQl.compile("""
 // {"ok":true,"sql":"WITH params AS ...", "binds":[...], ...}
 ```
 
-Build locally (needs JDK 21 + Maven):
+Build locally (needs JDK 11+ + Maven):
 
 ```bash
 ./scripts/build-jar.sh
