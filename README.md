@@ -192,17 +192,16 @@ Private git deps need a credential with read access (SSH deploy key, `GITHUB_TOK
 ```java
 import com.nilpferdschaefer.mcdxql.McdxQl;
 
-String response = McdxQl.compile("""
-  {
-    "expr": "AVG([close.1d; $from:$to], $period)",
-    "assets": ["BTC", "ETH"],
-    "params": {"period": 14, "from": 1700000000000, "to": 1700086400000}
-  }
-  """);
+String response = McdxQl.compile(
+    "{"
+        + "\"expr\":\"AVG([close.1d; $from:$to], $period)\","
+        + "\"assets\":[\"BTC\",\"ETH\"],"
+        + "\"params\":{\"period\":14,\"from\":1700000000000,\"to\":1700086400000}"
+        + "}");
 // {"ok":true,"sql":"WITH params AS ...", "binds":[...], ...}
 ```
 
-Build locally (needs JDK 21 + Maven):
+Build locally (needs JDK 11+ + Maven):
 
 ```bash
 ./scripts/build-jar.sh

@@ -20,7 +20,7 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.release>21</maven.compiler.release>
+    <maven.compiler.release>11</maven.compiler.release>
     <!-- Overridden in CI: https://maven.pkg.github.com/OWNER/REPO -->
     <github.maven.repo>https://maven.pkg.github.com/nilpferdschaefer/mcdx-ql</github.maven.repo>
   </properties>
