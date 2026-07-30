@@ -69,7 +69,50 @@ impl<'a> Parser<'a> {
 
     fn parse_batch_or_expr(&mut self) -> Result<BatchExpr, Error> {
         if matches!(self.peek().kind, TokenKind::LBrace) {
-            Ok(BatchExpr::Batch(self.parse_batch_map()?))
+            let map = self.parse_batch_map()?;
+            // Optional batch-level emit range: `{ … }[$from:$to]`. Desugars to
+            // wrapping each member with the same postfix Range so every series
+            // inherits it (same rules as a single-expr postfix).
+            if matches!(self.peek().kind, TokenKind::LBracket) {
+                let pos = self.peek().pos;
+                self.advance(); // [
+                let selector = self.parse_index_selector()?;
+                if !matches!(self.peek().kind, TokenKind::RBracket) {
+                    return Err(self.err("expected `]` after batch range", Some(self.peek().pos)));
+                }
+                self.advance();
+                let IndexSelector::Range { from, to } = selector else {
+                    return Err(self.err(
+                        "only an emit-range `[$from:$to]` may follow a batch; result index/slice belongs on a single expression",
+                        Some(pos),
+                    ));
+                };
+                let mut wrapped = BTreeMap::new();
+                for (name, expr) in map {
+                    if let Some(inner) = find_range_spec(&expr) {
+                        return Err(self.err(
+                            format!(
+                                "batch range `[$from:$to]` conflicts with a range already specified by member `{name}` (at byte {inner}); a range may be specified at only one level — descendants inherit it"
+                            ),
+                            Some(pos),
+                        ));
+                    }
+                    wrapped.insert(
+                        name,
+                        Expr::Index {
+                            base: Box::new(expr),
+                            selector: IndexSelector::Range {
+                                from: from.clone(),
+                                to: to.clone(),
+                            },
+                            pos,
+                        },
+                    );
+                }
+                Ok(BatchExpr::Batch(wrapped))
+            } else {
+                Ok(BatchExpr::Batch(map))
+            }
         } else {
             Ok(BatchExpr::Single(self.parse_expr()?))
         }
@@ -974,6 +1017,53 @@ mod tests {
             }
             _ => panic!("expected batch"),
         }
+    }
+
+    #[test]
+    fn parses_batch_postfix_range() {
+        let b = parse_batch(
+            "{ close: [close.1h], ema: EMA([close.1h], $ema_n) }[$from:$to]",
+        )
+        .unwrap();
+        match b {
+            BatchExpr::Batch(m) => {
+                for (name, expr) in &m {
+                    match expr {
+                        Expr::Index {
+                            selector: IndexSelector::Range { from, to },
+                            ..
+                        } => {
+                            assert_eq!(from.name, "from", "{name}");
+                            assert_eq!(to.name, "to", "{name}");
+                        }
+                        other => panic!("{name}: {other:?}"),
+                    }
+                }
+            }
+            _ => panic!("expected batch"),
+        }
+    }
+
+    #[test]
+    fn rejects_batch_result_slice() {
+        let err = parse_batch("{ close: [close.1h] }[-1]").unwrap_err();
+        assert_eq!(err.code.as_str(), "parse_error");
+        assert!(
+            err.message.contains("only an emit-range"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn rejects_batch_range_when_member_has_range() {
+        let err = parse_batch(
+            "{ close: [close.1h; $from:$to], ema: EMA([close.1h], 14) }[$from:$to]",
+        )
+        .unwrap_err();
+        assert_eq!(err.code.as_str(), "parse_error");
+        assert!(err.message.contains("only one level"), "{}", err.message);
+        assert!(err.message.contains("close"), "{}", err.message);
     }
 
     #[test]

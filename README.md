@@ -41,6 +41,7 @@ let q = compile(&CompileRequest {
 | Result index / slice | `AVG([close.1d], 14)[-1]`, `…[4]`, `…[-10:-1]`, `…[4:10]` |
 | Series @ asset | `[close.1d@self]`, `[close.1d@ETH; 100@$end]`, `[close.1d@$benchmark]` |
 | Inherited range (postfix) | `REGR(RET([close.1h@self]), RET([close.1h@$b]), 31)[$from:$to]` |
+| Batch inherited range | `{ close: [close.1h], ema: EMA([close.1h], 14) }[$from:$to]` |
 | Trailing window sugar | `AVG([close.1d; 100@$end], $period)` ≡ `AVG(…, t-($period-1), t)` |
 | Lookback | `t`, `t0`, `t-INT`, `t-($period-1)` |
 | Batch | `{ sma_14: AVG([close.1d], 14)[-1], … }` |
@@ -91,16 +92,31 @@ REGR(
 is exactly equivalent to writing `; $from:$to` inside each series. The range is
 distinguished from integer result slices (`[-1]`, `[4:10]`) by the leading `$`.
 
+The same postfix may follow a **batch** so every member shares one emit range:
+
+```text
+{
+  close: [close.1h@self],
+  vol:   STD(RET([close.1h@self]), $vol_n) * SQRT($bars_per_year),
+  beta:  REGR(RET([close.1h@self]), RET([close.1h@$benchmark]), $beta_n),
+  ema:   EMA([close.1h@self], $ema_n)
+}[$from:$to]
+```
+
+(`@self` is required on every series once any member references another asset,
+e.g. `$benchmark` in `beta`.)
+
 A range may be specified at **only one level** along any path: if a parent
-`[$from:$to]` is present, a descendant series (or nested `[$from:$to]`) may not
-also declare one. Doing so is a syntax error pointing at the conflict.
+`[$from:$to]` is present (including a batch-level postfix), a descendant series
+(or nested `[$from:$to]`) may not also declare one. Doing so is a syntax error
+pointing at the conflict.
 
 **Rules**
 
 - Bucket (`.1d` / `.1h` / …) is **required** on every series; all buckets in one expr must match.
 - Domain is optional; omit it for the full possible series. Use `[-1]` for the latest value, or `N@$end` / `N@latest` for backfills.
 - All series domains (and result slices) in one expr must resolve to the same emit range.
-- A postfix `expr[$from:$to]` sets the emit range for the whole subtree; descendants inherit it and may not also declare a range (enforced at parse time).
+- A postfix `expr[$from:$to]` (or `{ … }[$from:$to]` on a batch) sets the emit range for the whole subtree; descendants inherit it and may not also declare a range (enforced at parse time).
 - Bare series names / bare identifiers are illegal — series need `[]`, params need `$`.
 - Once any series is `@`-qualified, every series must be qualified (`@self` / `@TICKER` / `@$name`); mixing an implicit row series with a qualified one is rejected.
 - `$name` values come only from request `params` (missing → fail loud).
