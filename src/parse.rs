@@ -169,7 +169,8 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// `primary` with optional result index/slice: `AVG(...)[-1]`, `(…)[4:10]`.
+    /// `primary` with optional postfix: result index/slice (`AVG(...)[-1]`,
+    /// `(…)[4:10]`) or an emit-range override (`(…)[$from:$to]`).
     fn parse_postfix(&mut self) -> Result<Expr, Error> {
         let mut expr = self.parse_primary()?;
         while matches!(self.peek().kind, TokenKind::LBracket) {
@@ -180,6 +181,18 @@ impl<'a> Parser<'a> {
                 return Err(self.err("expected `]` after index/slice", Some(self.peek().pos)));
             }
             self.advance();
+            // A range applies to the whole subtree and is inherited by every
+            // descendant series, so a descendant may not also specify a range.
+            if matches!(selector, IndexSelector::Range { .. }) {
+                if let Some(inner) = find_range_spec(&expr) {
+                    return Err(self.err(
+                        format!(
+                            "range `[$from:$to]` here conflicts with a range already specified by an inner expression (at byte {inner}); a range may be specified at only one level — descendants inherit it"
+                        ),
+                        Some(pos),
+                    ));
+                }
+            }
             expr = Expr::Index {
                 base: Box::new(expr),
                 selector,
@@ -190,6 +203,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_index_selector(&mut self) -> Result<IndexSelector, Error> {
+        // Emit-range override `[$from:$to]` — distinguished from integer
+        // result slices by the leading `$` (indices/slices are integer-based).
+        if matches!(self.peek().kind, TokenKind::Dollar) {
+            let from = self.parse_domain_bound()?;
+            if !matches!(self.peek().kind, TokenKind::Colon) {
+                return Err(self.err(
+                    "expected `:` in range `[$from:$to]`",
+                    Some(self.peek().pos),
+                ));
+            }
+            self.advance();
+            let to = self.parse_domain_bound()?;
+            return Ok(IndexSelector::Range { from, to });
+        }
         // slice if we see `:` before closing `]`, else single index
         let start = if matches!(self.peek().kind, TokenKind::Colon) {
             None
@@ -305,6 +332,12 @@ impl<'a> Parser<'a> {
         let name_tok = self.advance();
         let name = match name_tok.kind {
             TokenKind::Ident(s) => s,
+            TokenKind::Dollar => {
+                return Err(self.err(
+                    "a range `[$from:$to]` is not a standalone value — apply it as a postfix to an expression, e.g. `REGR(…, …, 31)[$from:$to]`",
+                    Some(name_tok.pos),
+                ));
+            }
             _ => {
                 return Err(self.err("expected series name", Some(name_tok.pos)));
             }
@@ -706,6 +739,45 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Find the byte offset of the first emit-range specification anywhere in
+/// `expr` — a series with its own `; domain`, or a postfix `[$from:$to]`.
+/// Used to reject a range applied over a subtree that already has one.
+fn find_range_spec(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Series(s) => s.domain.as_ref().map(|_| s.pos),
+        Expr::Index {
+            base,
+            selector,
+            pos,
+        } => {
+            if matches!(selector, IndexSelector::Range { .. }) {
+                return Some(*pos);
+            }
+            find_range_spec(base)
+        }
+        Expr::BinOp { left, right, .. } => find_range_spec(left).or_else(|| find_range_spec(right)),
+        Expr::Call { args, window, .. } => {
+            for a in args {
+                if let Some(p) = find_range_spec(a) {
+                    return Some(p);
+                }
+            }
+            // Explicit lookback bounds may embed `(expr)` operands.
+            if let Some(WindowSpec::Explicit { start, end }) = window {
+                for b in [start, end] {
+                    if let LookbackBound::TMinus(inner) = b {
+                        if let Some(p) = find_range_spec(inner) {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Expr::Param { .. } | Expr::Literal { .. } => None,
+    }
+}
+
 fn op_takes_window(op: CallOp) -> bool {
     matches!(
         op,
@@ -849,6 +921,32 @@ mod tests {
             } => assert_eq!(args.len(), 2),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_postfix_range() {
+        let e = parse_expr("AVG([close.1d], 14)[$from:$to]").unwrap();
+        match e {
+            Expr::Index {
+                selector: IndexSelector::Range { from, to },
+                ..
+            } => {
+                assert_eq!(from.name, "from");
+                assert_eq!(to.name, "to");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_nested_range_at_parse() {
+        // Inner series range + outer postfix range is a syntax error.
+        let err = parse_expr(
+            "REGR(RET([close.1d@self; $from:$to]), RET([close.1d@$b]), 31)[$from:$to]",
+        )
+        .unwrap_err();
+        assert_eq!(err.code.as_str(), "parse_error");
+        assert!(err.message.contains("only one level"), "{}", err.message);
     }
 
     #[test]
