@@ -411,6 +411,76 @@ fn rejects_double_postfix_range() {
 }
 
 #[test]
+fn batch_postfix_range_matches_inline_domains() {
+    // `{ … }[$from:$to]` is equivalent to repeating `; $from:$to` / per-member postfix.
+    // Beta uses @$benchmark, so every series in the batch must be @-qualified (@self).
+    let mut inline = req(
+        "{ close: [close.1h@self; $from:$to], \
+           vol: STD(RET([close.1h@self; $from:$to]), $vol_n) * SQRT($bars_per_year), \
+           beta: REGR(RET([close.1h@self; $from:$to]), RET([close.1h@$benchmark; $from:$to]), $beta_n), \
+           ema: EMA([close.1h@self; $from:$to], $ema_n) }",
+    );
+    inline.params.insert("vol_n".into(), ParamValue::Int(14));
+    inline.params.insert("beta_n".into(), ParamValue::Int(31));
+    inline.params.insert("ema_n".into(), ParamValue::Int(14));
+    inline
+        .params
+        .insert("bars_per_year".into(), ParamValue::Float(8760.0));
+    inline
+        .params
+        .insert("benchmark".into(), ParamValue::Text("BTC".into()));
+
+    let mut postfix = req(
+        "{ close: [close.1h@self], \
+           vol: STD(RET([close.1h@self]), $vol_n) * SQRT($bars_per_year), \
+           beta: REGR(RET([close.1h@self]), RET([close.1h@$benchmark]), $beta_n), \
+           ema: EMA([close.1h@self], $ema_n) }[$from:$to]",
+    );
+    postfix.params.insert("vol_n".into(), ParamValue::Int(14));
+    postfix.params.insert("beta_n".into(), ParamValue::Int(31));
+    postfix.params.insert("ema_n".into(), ParamValue::Int(14));
+    postfix
+        .params
+        .insert("bars_per_year".into(), ParamValue::Float(8760.0));
+    postfix
+        .params
+        .insert("benchmark".into(), ParamValue::Text("BTC".into()));
+
+    let qi = compile(&inline).unwrap();
+    let qp = compile(&postfix).unwrap();
+    assert_eq!(qp.sql, qi.sql);
+    assert_eq!(qp.binds, qi.binds);
+    assert_eq!(
+        qp.indicators,
+        vec![
+            "beta".to_string(),
+            "close".to_string(),
+            "ema".to_string(),
+            "vol".to_string(),
+        ]
+    );
+    assert_eq!(
+        qp.domain,
+        Domain::Absolute {
+            from_param: "from".into(),
+            to_param: "to".into(),
+            from_ms: 1_700_000_000_000,
+            to_ms: 1_700_086_400_000,
+        }
+    );
+}
+
+#[test]
+fn rejects_batch_postfix_range_with_member_domain() {
+    let err = compile(&req(
+        "{ close: [close.1h; $from:$to], ema: EMA([close.1h], 14) }[$from:$to]",
+    ))
+    .unwrap_err();
+    assert_eq!(err.code.as_str(), "parse_error");
+    assert!(err.message.contains("only one level"), "{}", err.message);
+}
+
+#[test]
 fn rejects_unknown_series() {
     let err = compile(&req("AVG([cloze.1d; $from:$to], $period)")).unwrap_err();
     assert!(err.message.contains("unknown series [cloze]"));

@@ -8,6 +8,7 @@
 //! - `[close.1d; $from:$to]` — daily closes over an absolute ms range
 //! - `[close.1h]` — full possible hourly series from available data
 //! - `AVG([close.1d], 14)[-1]` — last SMA value (postfix result slice)
+//! - `{ close: [close.1h], ema: EMA([close.1h], 14) }[$from:$to]` — batch with shared emit range
 //! - `[close.1d@$benchmark]` — qualified asset
 //!
 //! Java consumers: enable `--features jni`, build the JAR under `java/` (see README).
