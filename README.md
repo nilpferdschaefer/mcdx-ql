@@ -39,7 +39,7 @@ let q = compile(&CompileRequest {
 | Trailing N bars to latest | `[close.1d; 100@latest]` / `[close.1d; $n@latest]` |
 | Full series (no domain) | `[close.1d]` → largest possible result series from available data |
 | Result index / slice | `AVG([close.1d], 14)[-1]`, `…[4]`, `…[-10:-1]`, `…[4:10]` |
-| Series @ asset | `[close.1d@ETH; 100@$end]`, `[close.1d@$benchmark]` |
+| Series @ asset | `[close.1d@self]`, `[close.1d@ETH; 100@$end]`, `[close.1d@$benchmark]` |
 | Trailing window sugar | `AVG([close.1d; 100@$end], $period)` ≡ `AVG(…, t-($period-1), t)` |
 | Lookback | `t`, `t0`, `t-INT`, `t-($period-1)` |
 | Batch | `{ sma_14: AVG([close.1d], 14)[-1], … }` |
@@ -66,13 +66,13 @@ Example — correlation of BTC vs ETH for 100 daily bars ending 15 May 2026:
 
 ```text
 REGR(
-  RET([close.1d; 100@$end]),
+  RET([close.1d@self; 100@$end]),
   RET([close.1d@ETH; 100@$end]),
   $period
 )
 ```
 
-with `assets=["BTC"]`, `params.end` = bar-open ms for 2026-05-15, `params.period=31`. Returns up to 100 rows (then `limit` / `after_ts`).
+with `assets=["BTC"]`, `params.end` = bar-open ms for 2026-05-15, `params.period=31`. Returns up to 100 rows (then `limit` / `after_ts`). `@self` is the row asset (`BTC`); it must be explicit because the expression also references `@ETH`.
 
 **Rules**
 
@@ -80,6 +80,7 @@ with `assets=["BTC"]`, `params.end` = bar-open ms for 2026-05-15, `params.period
 - Domain is optional; omit it for the full possible series. Use `[-1]` for the latest value, or `N@$end` / `N@latest` for backfills.
 - All series domains (and result slices) in one expr must resolve to the same emit range.
 - Bare series names / bare identifiers are illegal — series need `[]`, params need `$`.
+- Once any series is `@`-qualified, every series must be qualified (`@self` / `@TICKER` / `@$name`); mixing an implicit row series with a qualified one is rejected.
 - `$name` values come only from request `params` (missing → fail loud).
 - Request-level `dirty_from` / `dirty_to` and conflicting `reporting_period` are rejected.
 - `t` / `t0` are illegal inside the domain slot.
@@ -96,17 +97,26 @@ Postgres `REGR_SLOPE(y, x)` window aggregate.
 
 ```text
 REGR(
-  RET([close.1h; $from:$to]),            -- row asset returns  (y)
+  RET([close.1h@self; $from:$to]),       -- row asset returns  (y)
   RET([close.1h@$benchmark; $from:$to]), -- benchmark returns  (x)
   31
 )
 ```
 
-is the 31-period 1h beta of the request asset against `$benchmark`. When an
-expression compares more than one asset, qualify each non-row series after `@`
-(literal ticker or `$param`); every qualified ticker gets its own `market_ret`
-CTE, so you can also regress two explicit tickers, e.g.
+is the 31-period 1h beta of the request asset against `$benchmark`.
+
+**Explicit qualification for multi-asset expressions.** Whenever an expression
+references more than one asset — i.e. any series is `@`-qualified — **every**
+series must be qualified after `@`, so the comparison is unambiguous. Qualify the
+per-row request asset with `@self`, a literal ticker with `@TICKER`, or a param
+with `@$name`. Mixing an implicit (unqualified) row series with an `@`-qualified
+series is rejected. Each distinct qualified ticker gets its own `market_ret` CTE,
+so you can also regress two explicit tickers, e.g.
 `REGR(RET([close.1h@BTC; …]), RET([close.1h@ETH; …]), 31)`.
+
+Single-asset expressions are unchanged: a bare `[close.1d]` (implicit row asset)
+is fine as long as no other asset is referenced, so indicators that reuse the row
+close several times (e.g. `sep_atr`) need no `@self`.
 
 ### Warmup (derived)
 
@@ -128,7 +138,7 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 | `atr_14` | `RMA(TR([close.1d; $from:$to]), $period)` |
 | `rsi_14` | `RSI([close.1d; $from:$to], $period)` |
 | `sep_atr` | `(AVG(…, $fast) - AVG(…, $slow)) / RMA(TR(…), $atr)` |
-| `beta_31` | `REGR(RET([close.1d; …]), RET([close.1d@$benchmark; …]), $period)` |
+| `beta_31` | `REGR(RET([close.1d@self; …]), RET([close.1d@$benchmark; …]), $period)` |
 
 `bb_14` (object mid/upper/lower) is deferred.
 

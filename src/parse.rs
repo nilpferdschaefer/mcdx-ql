@@ -327,6 +327,8 @@ impl<'a> Parser<'a> {
                 TokenKind::Ident(_) => {
                     let t = self.advance();
                     match t.kind {
+                        // `@self` explicitly names the per-row request asset.
+                        TokenKind::Ident(s) if s == "self" => AssetRef::SelfRow,
                         TokenKind::Ident(s) => AssetRef::Literal(s),
                         _ => unreachable!(),
                     }
@@ -833,7 +835,7 @@ mod tests {
     #[test]
     fn parses_regr_alias() {
         let e = parse_expr(
-            "REGR(RET([close.1h; $from:$to]), RET([close.1h@$benchmark; $from:$to]), 31)",
+            "REGR(RET([close.1h@self; $from:$to]), RET([close.1h@$benchmark; $from:$to]), 31)",
         )
         .unwrap();
         match e {
@@ -846,6 +848,18 @@ mod tests {
                 ..
             } => assert_eq!(args.len(), 2),
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_self_qualifier() {
+        let e = parse_expr("RET([close.1h@self; $from:$to])").unwrap();
+        match e {
+            Expr::Call { args, .. } => match &args[0] {
+                Expr::Series(s) => assert_eq!(s.asset, AssetRef::SelfRow),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
         }
     }
 

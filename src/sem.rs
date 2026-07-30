@@ -99,6 +99,8 @@ pub fn analyze(
         market_tickers: BTreeSet::new(),
         required_params: BTreeSet::new(),
         series_names: BTreeSet::new(),
+        implicit_row_positions: Vec::new(),
+        has_qualified_series: false,
     };
 
     match batch {
@@ -110,6 +112,19 @@ pub fn analyze(
             for e in map.values() {
                 ctx.walk_expr(e)?;
             }
+        }
+    }
+
+    // Once an expression references another asset via `@`, every series must be
+    // qualified explicitly so the comparison is unambiguous — the implicit row
+    // asset must be written as `@self`.
+    if ctx.has_qualified_series {
+        if let Some(&pos) = ctx.implicit_row_positions.first() {
+            return Err(Error::sem(
+                "this expression compares more than one asset, so every series must be qualified after `@` — write the row asset as `@self` (e.g. `[close.1d@self; …]`)",
+                expr_src,
+                Some(pos),
+            ));
         }
     }
 
@@ -216,6 +231,10 @@ struct AnalyzeCtx<'a> {
     market_tickers: BTreeSet<String>,
     required_params: BTreeSet<String>,
     series_names: BTreeSet<String>,
+    /// Byte offsets of series that use the implicit row asset (no `@`).
+    implicit_row_positions: Vec<usize>,
+    /// Whether any series is `@`-qualified (literal ticker or `$param`).
+    has_qualified_series: bool,
 }
 
 impl<'a> AnalyzeCtx<'a> {
@@ -328,11 +347,14 @@ impl<'a> AnalyzeCtx<'a> {
         }
 
         match &s.asset {
-            AssetRef::Row => {}
+            AssetRef::Row => self.implicit_row_positions.push(s.pos),
+            AssetRef::SelfRow => {}
             AssetRef::Literal(t) => {
+                self.has_qualified_series = true;
                 self.market_tickers.insert(t.clone());
             }
             AssetRef::Param(p) => {
+                self.has_qualified_series = true;
                 let v = self.require_param(p, Some(s.pos))?;
                 let ticker = v.as_text().ok_or_else(|| {
                     Error::sem(
