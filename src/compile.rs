@@ -279,7 +279,7 @@ impl Codegen<'_> {
 
     fn gen_series(&mut self, s: &Series) -> Result<Frag, Error> {
         let col = match s.asset {
-            AssetRef::Row => match s.name.as_str() {
+            AssetRef::Row | AssetRef::SelfRow => match s.name.as_str() {
                 "close" => "e.close".to_string(),
                 "open" => "e.open".to_string(),
                 "high" => "e.high".to_string(),
@@ -302,7 +302,7 @@ impl Codegen<'_> {
                         .ok_or_else(|| {
                             Error::compile(format!("missing ticker param `${p}`"), self.expr_src)
                         })?,
-                    AssetRef::Row => unreachable!(),
+                    AssetRef::Row | AssetRef::SelfRow => unreachable!(),
                 };
                 let join = market_join_alias(&ticker, self.analysis.market_tickers.len());
                 match s.name.as_str() {
@@ -598,7 +598,7 @@ fn is_row_close(expr: &Expr) -> bool {
         expr,
         Expr::Series(Series {
             name,
-            asset: AssetRef::Row,
+            asset: AssetRef::Row | AssetRef::SelfRow,
             ..
         }) if name == "close"
     )

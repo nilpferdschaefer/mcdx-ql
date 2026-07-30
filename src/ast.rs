@@ -45,7 +45,7 @@ pub enum Expr {
     },
 }
 
-/// Postfix result selector on a timeseries-valued expression.
+/// Postfix selector on a timeseries-valued expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexSelector {
     /// Single element. Positive = 1-based from start of possible results; negative from end (`-1` = last).
@@ -54,6 +54,13 @@ pub enum IndexSelector {
     Slice {
         start: Option<i64>,
         end: Option<i64>,
+    },
+    /// Emit-range override applied to the whole subtree: `expr[$from:$to]`.
+    /// Every descendant series inherits this range; a descendant may not also
+    /// specify a range of its own (enforced at parse time).
+    Range {
+        from: DomainBound,
+        to: DomainBound,
     },
 }
 
@@ -115,8 +122,13 @@ pub enum EmitEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetRef {
-    /// Default: row asset from `params.coins`.
+    /// Implicit row asset (no `@`): the per-row asset from `params.coins`.
     Row,
+    /// Explicit row asset: `[close.1d@self; …]`. Behaves identically to `Row`,
+    /// but is required (instead of the implicit form) when an expression mixes
+    /// the row asset with an `@`-qualified series, so multi-asset comparisons are
+    /// always spelled out.
+    SelfRow,
     /// Literal ticker: `[close@TOTALCRYPTOMARKETCAP; …]`.
     Literal(String),
     /// Param ticker: `[close@$benchmark; …]`.
