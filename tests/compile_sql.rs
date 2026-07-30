@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use mcdx_ql::{compile, BindValue, CompileRequest, Domain, ParamValue};
+use mcdx_ql::{compile, BindValue, CompileRequest, Domain, ParamValue, SourceTable};
 use pretty_assertions::assert_eq;
 
 fn base_params() -> BTreeMap<String, ParamValue> {
@@ -17,11 +17,19 @@ fn req(expr: &str) -> CompileRequest {
     CompileRequest {
         expr: expr.to_string(),
         reporting_period: None,
+        source_table: SourceTable::Data,
         assets: vec!["BTC".into(), "ETH".into()],
         params: base_params(),
         after_ts: -1,
         limit: 16,
         publish_from: None,
+    }
+}
+
+fn req_obj(expr: &str) -> CompileRequest {
+    CompileRequest {
+        source_table: SourceTable::Obj,
+        ..req(expr)
     }
 }
 
@@ -481,9 +489,39 @@ fn rejects_batch_postfix_range_with_member_domain() {
 }
 
 #[test]
-fn rejects_unknown_series() {
-    let err = compile(&req("AVG([cloze.1d; $from:$to], $period)")).unwrap_err();
-    assert!(err.message.contains("unknown series [cloze]"));
+fn rejects_mismatched_data_types() {
+    let err = compile(&req(
+        "AVG([close.1d; $from:$to], $period) + AVG([open.1d; $from:$to], $period)",
+    ))
+    .unwrap_err();
+    assert!(
+        err.message.contains("all series data_types must match"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn custom_data_type_filters_core_data() {
+    let q = compile(&req("AVG([funding_rate.1d; $from:$to], $period)")).unwrap();
+    assert_eq!(q.data_type, "funding_rate");
+    assert_eq!(q.source_table, SourceTable::Data);
+    assert!(q.sql.contains("FROM core.data c"));
+    assert!(q.sql.contains("c.data_type = 'funding_rate'"));
+    assert!(!q.sql.contains("c.data_type = 'close'"));
+    assert!(q.sql.contains("AVG(e.close) OVER w_funding_rate_1d_14"));
+}
+
+#[test]
+fn source_table_obj_scans_core_obj() {
+    let q = compile(&req_obj("[bbands.1h; $from:$to]")).unwrap();
+    assert_eq!(q.source_table, SourceTable::Obj);
+    assert_eq!(q.data_type, "bbands");
+    assert_eq!(q.reporting_period, "1h");
+    assert!(q.sql.contains("FROM core.obj c"));
+    assert!(!q.sql.contains("FROM core.data c"));
+    assert!(q.sql.contains("c.data_type = 'bbands'"));
+    assert!(q.sql.contains("c.value AS close"));
 }
 
 #[test]

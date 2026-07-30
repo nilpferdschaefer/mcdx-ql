@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::compile::{compile, BindValue, CompileRequest, CompiledQuery, Scaffolds};
+use crate::compile::{
+    compile, BindValue, CompiledQuery, CompileRequest, Scaffolds, SourceTable,
+};
 use crate::error::Error;
 use crate::sem::{Domain, ParamValue};
 
@@ -14,6 +16,9 @@ pub struct CompileRequestJson {
     pub expr: String,
     #[serde(default)]
     pub reporting_period: Option<String>,
+    /// `"data"` (`core.data`) or `"obj"` (`core.obj`). Defaults to `"data"`.
+    #[serde(default = "default_source_table")]
+    pub source_table: String,
     pub assets: Vec<String>,
     #[serde(default)]
     pub params: BTreeMap<String, ParamValueJson>,
@@ -23,6 +28,10 @@ pub struct CompileRequestJson {
     pub limit: i32,
     #[serde(default)]
     pub publish_from: Option<i64>,
+}
+
+fn default_source_table() -> String {
+    SourceTable::Data.as_str().to_string()
 }
 
 fn default_after_ts() -> i64 {
@@ -150,6 +159,8 @@ pub struct CompiledQueryJson {
     pub sql: String,
     pub binds: Vec<BindValueJson>,
     pub reporting_period: String,
+    pub data_type: String,
+    pub source_table: String,
     pub expr: String,
     pub domain: DomainJson,
     pub indicators: Vec<String>,
@@ -164,6 +175,8 @@ impl From<&CompiledQuery> for CompiledQueryJson {
             sql: q.sql.clone(),
             binds: q.binds.iter().map(BindValueJson::from).collect(),
             reporting_period: q.reporting_period.clone(),
+            data_type: q.data_type.clone(),
+            source_table: q.source_table.as_str().to_string(),
             expr: q.expr.clone(),
             domain: DomainJson::from(&q.domain),
             indicators: q.indicators.clone(),
@@ -209,10 +222,17 @@ pub enum CompileResponseJson {
 }
 
 impl CompileRequestJson {
-    pub fn into_request(self) -> CompileRequest {
-        CompileRequest {
+    pub fn into_request(self) -> Result<CompileRequest, String> {
+        let source_table = SourceTable::from_str(&self.source_table).ok_or_else(|| {
+            format!(
+                "invalid source_table `{}` (expected `data` or `obj`)",
+                self.source_table
+            )
+        })?;
+        Ok(CompileRequest {
             expr: self.expr,
             reporting_period: self.reporting_period,
+            source_table,
             assets: self.assets,
             params: self
                 .params
@@ -222,7 +242,7 @@ impl CompileRequestJson {
             after_ts: self.after_ts,
             limit: self.limit,
             publish_from: self.publish_from,
-        }
+        })
     }
 }
 
@@ -230,7 +250,24 @@ impl CompileRequestJson {
 pub fn compile_json(request_json: &str) -> String {
     let parsed: Result<CompileRequestJson, _> = serde_json::from_str(request_json);
     let req = match parsed {
-        Ok(r) => r.into_request(),
+        Ok(r) => match r.into_request() {
+            Ok(req) => req,
+            Err(message) => {
+                return serde_json::to_string(&CompileResponseJson::Err {
+                    ok: false,
+                    error: ErrorJson {
+                        code: "parse_error".into(),
+                        message,
+                        expr: String::new(),
+                        pos: None,
+                    },
+                })
+                .unwrap_or_else(|_| {
+                    r#"{"ok":false,"error":{"code":"parse_error","message":"json encode failed","expr":""}}"#
+                        .into()
+                });
+            }
+        },
         Err(e) => {
             return serde_json::to_string(&CompileResponseJson::Err {
                 ok: false,
@@ -254,6 +291,8 @@ pub fn compile_json(request_json: &str) -> String {
             "sql": q.sql,
             "binds": q.binds.iter().map(BindValueJson::from).collect::<Vec<_>>(),
             "reporting_period": q.reporting_period,
+            "data_type": q.data_type,
+            "source_table": q.source_table.as_str(),
             "expr": q.expr,
             "domain": DomainJson::from(&q.domain),
             "indicators": q.indicators,
@@ -293,14 +332,49 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert!(v["sql"].as_str().unwrap().contains("AVG(e.close)"));
         assert_eq!(v["reporting_period"], "1d");
+        assert_eq!(v["data_type"], "close");
+        assert_eq!(v["source_table"], "data");
+    }
+
+    #[test]
+    fn compile_json_obj_source() {
+        let req = r#"{
+            "expr": "[bbands.1d; $from:$to]",
+            "source_table": "obj",
+            "assets": ["BTC"],
+            "params": {"from": 100, "to": 200}
+        }"#;
+        let out = compile_json(req);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["source_table"], "obj");
+        assert_eq!(v["data_type"], "bbands");
+        assert!(v["sql"].as_str().unwrap().contains("FROM core.obj c"));
     }
 
     #[test]
     fn compile_json_error() {
-        let req = r#"{"expr": "AVG([cloze.1d], 14)", "assets": ["BTC"], "params": {"period": 14}}"#;
+        let req = r#"{"expr": "AVG([close.1d], 14) + AVG([open.1d], 14)", "assets": ["BTC"], "params": {"period": 14}}"#;
         let out = compile_json(req);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["error"]["code"], "sem_error");
+    }
+
+    #[test]
+    fn compile_json_rejects_bad_source_table() {
+        let req = r#"{
+            "expr": "[close.1d]",
+            "source_table": "candle",
+            "assets": ["BTC"]
+        }"#;
+        let out = compile_json(req);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"]["code"], "parse_error");
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("source_table"));
     }
 }

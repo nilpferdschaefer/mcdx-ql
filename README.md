@@ -1,6 +1,6 @@
 # mcdx-ql
 
-Compile MCDX indicator expression grammar into the joint-analytics SQL envelope that runs against `core.data`.
+Compile MCDX indicator expression grammar into the joint-analytics SQL envelope that runs against `core.data` or `core.obj`.
 
 This crate is **SQL generation only** — no HTTP, no DB I/O. The datastore read-api (or analytics) owns execution and the response envelope (`ok`, `rows`, pagination).
 
@@ -8,11 +8,12 @@ This crate is **SQL generation only** — no HTTP, no DB I/O. The datastore read
 
 ```rust
 use std::collections::BTreeMap;
-use mcdx_ql::{compile, CompileRequest, ParamValue};
+use mcdx_ql::{compile, CompileRequest, ParamValue, SourceTable};
 
 let q = compile(&CompileRequest {
     expr: "AVG([close.1d; $from:$to], $period)".into(),
     reporting_period: None, // bucket comes from `.1d` in the grammar
+    source_table: SourceTable::Data, // or SourceTable::Obj for core.obj (JSONB value)
     assets: vec!["BTC".into(), "ETH".into()],
     params: BTreeMap::from([
         ("period".into(), ParamValue::Int(14)),
@@ -27,7 +28,14 @@ let q = compile(&CompileRequest {
 // q.sql  — full WITH … SELECT envelope
 // q.binds — coins, dirty_from, dirty_to, after_ts, lim, publish_from, max_lookback, indicators
 //           (dirty_* are NULL when emit bounds come from available data / slices)
+// q.data_type / q.source_table — series filter + relation (`core.data` / `core.obj`)
 ```
+
+**Source table & data_type**
+
+- Series name is the datastore `data_type` filter: `[close.1d]` → `data_type = 'close'`, `[funding_rate.1h]` → `funding_rate`, etc. All series in one expression must share the same `data_type`.
+- Request `source_table` selects the relation: `data` → `core.data` (scalar `value`, default) or `obj` → `core.obj` (same shape, JSONB `value`).
+- The CTE pipeline still projects the payload as an internal `close` column for indicator SQL; only the `FROM` relation and `data_type` filter change.
 
 ## Grammar (summary)
 
@@ -114,6 +122,7 @@ pointing at the conflict.
 **Rules**
 
 - Bucket (`.1d` / `.1h` / …) is **required** on every series; all buckets in one expr must match.
+- Series name is the `data_type` filter; all series names in one expr must match.
 - Domain is optional; omit it for the full possible series. Use `[-1]` for the latest value, or `N@$end` / `N@latest` for backfills.
 - All series domains (and result slices) in one expr must resolve to the same emit range.
 - A postfix `expr[$from:$to]` (or `{ … }[$from:$to]` on a batch) sets the emit range for the whole subtree; descendants inherit it and may not also declare a range (enforced at parse time).
@@ -187,6 +196,8 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 - `sql` — CTE pipeline (`params` → `bounds` → `ordered` → `enriched` → optional `market_ret` → `windowed` → `unpivoted` → `ranked`)
 - `binds` — eight positional parameters; `dirty_from`/`dirty_to` are set only for absolute domains
 - `reporting_period` — derived from series bucket (e.g. `1d`)
+- `data_type` — derived from series name (e.g. `close`)
+- `source_table` — `Data` (`core.data`) or `Obj` (`core.obj`)
 - `domain` — `Absolute` / `Full` / `TrailingLatest` / `FromStart`
 - `max_lookback` — pads scan before `emit_from`
 - `scaffolds` / `indicators` — as before

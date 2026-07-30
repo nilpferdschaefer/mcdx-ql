@@ -12,6 +12,46 @@ use crate::parse::parse_batch;
 use crate::sem::{analyze, Analysis, Domain, ParamValue};
 use crate::EMPTY_PARAMS_HASH;
 
+/// Which datastore relation to scan for series bars.
+///
+/// `Data` (`core.data`) holds scalar `value`; `Obj` (`core.obj`) has the same
+/// row shape with a JSONB `value`. Both are filtered by series `data_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceTable {
+    /// `core.data` — numeric scalar payload (default).
+    #[default]
+    Data,
+    /// `core.obj` — JSONB payload; same keys/indexes as `core.data`.
+    Obj,
+}
+
+impl SourceTable {
+    /// Qualified SQL relation name (`core.data` / `core.obj`).
+    pub fn sql_relation(self) -> &'static str {
+        match self {
+            Self::Data => "core.data",
+            Self::Obj => "core.obj",
+        }
+    }
+
+    /// Wire / JSON name (`data` / `obj`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Data => "data",
+            Self::Obj => "obj",
+        }
+    }
+
+    /// Parse a wire name; unknown values are rejected by the caller.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "data" => Some(Self::Data),
+            "obj" => Some(Self::Obj),
+            _ => None,
+        }
+    }
+}
+
 /// Request inputs for compilation (mirrors the read-api request minus HTTP concerns).
 #[derive(Debug, Clone)]
 pub struct CompileRequest {
@@ -20,6 +60,8 @@ pub struct CompileRequest {
     /// Optional echo/check of bucket. Grammar owns the period via `[close.1d]`;
     /// if set here it must match every series bucket.
     pub reporting_period: Option<String>,
+    /// Datastore table to scan (`core.data` or `core.obj`). Defaults to [`SourceTable::Data`].
+    pub source_table: SourceTable,
     pub assets: Vec<String>,
     pub params: BTreeMap<String, ParamValue>,
     /// Exclusive pagination cursor (`-1` = first page).
@@ -54,6 +96,10 @@ pub struct CompiledQuery {
     /// Positional binds matching `?` placeholders in order.
     pub binds: Vec<BindValue>,
     pub reporting_period: String,
+    /// Series `data_type` filter (from grammar series name, e.g. `close`).
+    pub data_type: String,
+    /// Datastore relation scanned (`core.data` / `core.obj`).
+    pub source_table: SourceTable,
     pub expr: String,
     pub domain: Domain,
     pub indicators: Vec<String>,
@@ -95,6 +141,7 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
     }
 
     let reporting_period = analysis.reporting_period.clone();
+    let data_type = analysis.data_type.clone();
     let interval = interval_ms(&reporting_period).map_err(|e| {
         Error::compile(format!("{e}"), &req.expr)
     })?;
@@ -148,6 +195,8 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
     };
 
     let sql = render_envelope(
+        req.source_table,
+        &data_type,
         &reporting_period,
         interval,
         &scaffolds,
@@ -180,6 +229,8 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         sql,
         binds,
         reporting_period,
+        data_type,
+        source_table: req.source_table,
         expr: req.expr.clone(),
         domain: analysis.domain.clone(),
         indicators,
@@ -278,20 +329,10 @@ impl Codegen<'_> {
     }
 
     fn gen_series(&mut self, s: &Series) -> Result<Frag, Error> {
+        // Ordered/enriched project the scanned payload as `close` regardless of
+        // `data_type` name — the grammar series name only selects the filter.
         let col = match s.asset {
-            AssetRef::Row | AssetRef::SelfRow => match s.name.as_str() {
-                "close" => "e.close".to_string(),
-                "open" => "e.open".to_string(),
-                "high" => "e.high".to_string(),
-                "low" => "e.low".to_string(),
-                "volume" => "e.volume".to_string(),
-                other => {
-                    return Err(Error::compile(
-                        format!("unsupported series [{other}]"),
-                        self.expr_src,
-                    ))
-                }
-            },
+            AssetRef::Row | AssetRef::SelfRow => "e.close".to_string(),
             AssetRef::Literal(_) | AssetRef::Param(_) => {
                 let ticker = match &s.asset {
                     AssetRef::Literal(t) => t.clone(),
@@ -305,15 +346,7 @@ impl Codegen<'_> {
                     AssetRef::Row | AssetRef::SelfRow => unreachable!(),
                 };
                 let join = market_join_alias(&ticker, self.analysis.market_tickers.len());
-                match s.name.as_str() {
-                    "close" => format!("{join}.close"),
-                    other => {
-                        return Err(Error::compile(
-                            format!("@{ticker} currently only supports [close], not [{other}]"),
-                            self.expr_src,
-                        ))
-                    }
-                }
+                format!("{join}.close")
             }
         };
 
@@ -335,9 +368,9 @@ impl Codegen<'_> {
     ) -> Result<Frag, Error> {
         match op {
             CallOp::Ret => {
-                let value_sql = if is_row_close(&args[0]) {
+                let value_sql = if is_row_primary_series(&args[0]) {
                     "e.bar_ret".to_string()
-                } else if let Some(ticker) = market_close_ticker(&args[0], self.params) {
+                } else if let Some(ticker) = market_series_ticker(&args[0], self.params) {
                     let join = market_join_alias(&ticker, self.analysis.market_tickers.len());
                     format!("{join}.market_ret")
                 } else {
@@ -426,10 +459,10 @@ impl Codegen<'_> {
             CallOp::Rma => {
                 let period = self.resolve_period(window, pos)?;
                 // RMA(TR(close)) → Wilder ATR over closes_to_date (analytics atrWilderSql).
-                if !is_tr_of_close(&args[0]) {
+                if !is_tr_of_primary_series(&args[0]) {
                     let _ = self.gen_expr(&args[0])?;
                     return Err(Error::compile(
-                        "RMA currently supports RMA(TR([close; …]), $period) only",
+                        "RMA currently supports RMA(TR([series; …]), $period) only",
                         self.expr_src,
                     ));
                 }
@@ -593,40 +626,37 @@ fn sanitize_ident(s: &str) -> String {
         .collect()
 }
 
-fn is_row_close(expr: &Expr) -> bool {
+fn is_row_primary_series(expr: &Expr) -> bool {
     matches!(
         expr,
         Expr::Series(Series {
-            name,
             asset: AssetRef::Row | AssetRef::SelfRow,
             ..
-        }) if name == "close"
+        })
     )
 }
 
-fn market_close_ticker(expr: &Expr, params: &BTreeMap<String, ParamValue>) -> Option<String> {
+fn market_series_ticker(expr: &Expr, params: &BTreeMap<String, ParamValue>) -> Option<String> {
     match expr {
         Expr::Series(Series {
-            name,
             asset: AssetRef::Literal(t),
             ..
-        }) if name == "close" => Some(t.clone()),
+        }) => Some(t.clone()),
         Expr::Series(Series {
-            name,
             asset: AssetRef::Param(p),
             ..
-        }) if name == "close" => params.get(p).and_then(|v| v.as_text().map(str::to_string)),
+        }) => params.get(p).and_then(|v| v.as_text().map(str::to_string)),
         _ => None,
     }
 }
 
-fn is_tr_of_close(expr: &Expr) -> bool {
+fn is_tr_of_primary_series(expr: &Expr) -> bool {
     match expr {
         Expr::Call {
             op: CallOp::Tr,
             args,
             ..
-        } => args.len() == 1 && is_row_close(&args[0]),
+        } => args.len() == 1 && is_row_primary_series(&args[0]),
         _ => false,
     }
 }
@@ -762,14 +792,22 @@ fn rsi_sql(closes_arr: &str, period: i32) -> String {
 }
 
 /// Bounds CTE: absolute uses dirty_* binds; other domains resolve from available data.
-fn render_bounds_cte(domain: &Domain, reporting_period: &str, interval_ms: i64) -> String {
+fn render_bounds_cte(
+    source_table: SourceTable,
+    data_type: &str,
+    domain: &Domain,
+    reporting_period: &str,
+    interval_ms: i64,
+) -> String {
+    let relation = source_table.sql_relation();
+    let data_type_sql = sql_str_literal(data_type);
     let scan = format!(
         "CROSS JOIN LATERAL (\n\
          \x20   SELECT MIN(c.timestamp_start) AS min_ts,\n\
          \x20          MAX(c.timestamp_start) AS max_ts\n\
-         \x20   FROM core.data c\n\
+         \x20   FROM {relation} c\n\
          \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
-         \x20   WHERE c.data_type = 'close'\n\
+         \x20   WHERE c.data_type = '{data_type_sql}'\n\
          \x20     AND c.reporting_period = '{reporting_period}'\n\
          \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
          \x20     AND a.canonical_ticker = ANY(p.coins)\n\
@@ -853,7 +891,13 @@ fn render_bounds_cte(domain: &Domain, reporting_period: &str, interval_ms: i64) 
     }
 }
 
+fn sql_str_literal(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 fn render_envelope(
+    source_table: SourceTable,
+    data_type: &str,
     reporting_period: &str,
     interval_ms: i64,
     scaffolds: &Scaffolds,
@@ -862,6 +906,8 @@ fn render_envelope(
     domain: &Domain,
 ) -> String {
     let mut sql = String::new();
+    let relation = source_table.sql_relation();
+    let data_type_sql = sql_str_literal(data_type);
 
     writeln!(
         sql,
@@ -882,11 +928,19 @@ fn render_envelope(
     writeln!(
         sql,
         "{}",
-        render_bounds_cte(domain, reporting_period, interval_ms)
+        render_bounds_cte(
+            source_table,
+            data_type,
+            domain,
+            reporting_period,
+            interval_ms
+        )
     )
     .unwrap();
 
-    // ordered — scan pads lookback before emit_from
+    // ordered — scan pads lookback before emit_from.
+    // Payload is always projected as `close` for the indicator pipeline; the
+    // grammar series name selects `data_type` (and `source_table` chooses the relation).
     writeln!(
         sql,
         "ordered AS (\n\
@@ -899,11 +953,11 @@ fn render_envelope(
          \x20          - ((ROW_NUMBER() OVER (\n\
          \x20                 PARTITION BY c.asset ORDER BY c.timestamp_start) - 1)\n\
          \x20             * {interval_ms}) AS seg_key\n\
-         \x20 FROM core.data c\n\
+         \x20 FROM {relation} c\n\
          \x20 JOIN core.mcdx_asset a ON a.id = c.asset\n\
          \x20 CROSS JOIN params p\n\
          \x20 CROSS JOIN bounds b\n\
-         \x20 WHERE c.data_type = 'close'\n\
+         \x20 WHERE c.data_type = '{data_type_sql}'\n\
          \x20   AND c.reporting_period = '{reporting_period}'\n\
          \x20   AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
          \x20   AND a.canonical_ticker = ANY(p.coins)\n\
@@ -979,11 +1033,11 @@ fn render_envelope(
              \x20               ELSE c.value / LAG(c.value) OVER (\n\
              \x20                     PARTITION BY c.asset ORDER BY c.timestamp_start) - 1.0\n\
              \x20          END AS bar_ret\n\
-             \x20   FROM core.data c\n\
+             \x20   FROM {relation} c\n\
              \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
              \x20   CROSS JOIN params p\n\
              \x20   CROSS JOIN bounds b\n\
-             \x20   WHERE c.data_type = 'close'\n\
+             \x20   WHERE c.data_type = '{data_type_sql}'\n\
              \x20     AND c.reporting_period = '{reporting_period}'\n\
              \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
              \x20     AND a.canonical_ticker = '{ticker}'\n\

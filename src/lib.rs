@@ -1,7 +1,7 @@
 //! Indicator expression grammar → joint analytics SQL.
 //!
 //! Parses the MCDX indicator grammar and compiles it to the shared CTE pipeline
-//! that analytics runs against `core.data`.
+//! that analytics runs against `core.data` or `core.obj`.
 //!
 //! Series literals carry the bar bucket and an optional emit domain:
 //!
@@ -32,6 +32,7 @@ pub use ast::{
 };
 pub use compile::{
     compile, compile_batch, compile_expr, BindValue, CompiledQuery, CompileRequest, Scaffolds,
+    SourceTable,
 };
 pub use error::{Error, ErrorCode};
 pub use interval::{interval_ms, IntervalError};

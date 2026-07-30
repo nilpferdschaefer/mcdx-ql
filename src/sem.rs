@@ -69,6 +69,8 @@ pub struct Analysis {
     pub domain: Domain,
     /// Unified bar bucket from series literals (`1d`, `1h`, …).
     pub reporting_period: String,
+    /// Unified series `data_type` filter (grammar series name, e.g. `close`).
+    pub data_type: String,
     pub max_lookback: i32,
     pub needs_bar_ret: bool,
     pub needs_closes_to_date: bool,
@@ -90,6 +92,7 @@ pub fn analyze(
         expr_src,
         domain: None,
         reporting_period: None,
+        data_type: None,
         saw_series: false,
         max_lookback: 0,
         needs_bar_ret: false,
@@ -139,6 +142,13 @@ pub fn analyze(
 
     let reporting_period = ctx.reporting_period.ok_or_else(|| {
         Error::sem("expression must declare a series bucket (e.g. `[close.1d]`)", expr_src, None)
+    })?;
+    let data_type = ctx.data_type.ok_or_else(|| {
+        Error::sem(
+            "expression must declare a series data_type (e.g. `[close.1d]`)",
+            expr_src,
+            None,
+        )
     })?;
 
     let domain = ctx.domain.unwrap_or(Domain::Full);
@@ -207,6 +217,7 @@ pub fn analyze(
     Ok(Analysis {
         domain,
         reporting_period,
+        data_type,
         max_lookback: ctx.max_lookback.max(1),
         needs_bar_ret: ctx.needs_bar_ret,
         needs_closes_to_date: ctx.needs_closes_to_date,
@@ -223,6 +234,7 @@ struct AnalyzeCtx<'a> {
     expr_src: &'a str,
     domain: Option<Domain>,
     reporting_period: Option<String>,
+    data_type: Option<String>,
     saw_series: bool,
     max_lookback: i32,
     needs_bar_ret: bool,
@@ -318,36 +330,33 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn walk_series(&mut self, s: &Series) -> Result<(), Error> {
-        match s.name.as_str() {
-            "close" => {}
-            "high" | "low" => {
-                // Scaffold hooks exist for ADX; full multi-type ordered scan is not yet emitted.
+        // Series name is the datastore `data_type` filter (`close`, `open`, custom
+        // names, …). All series in one expression must share a single data_type;
+        // multi-type ordered scans (e.g. ADX high+low together) are not yet emitted.
+        if s.name.is_empty() {
+            return Err(Error::sem(
+                "series data_type must be non-empty",
+                self.expr_src,
+                Some(s.pos),
+            ));
+        }
+        self.saw_series = true;
+        self.series_names.insert(s.name.clone());
+
+        match &self.data_type {
+            None => self.data_type = Some(s.name.clone()),
+            Some(existing) if existing == &s.name => {}
+            Some(existing) => {
                 return Err(Error::sem(
                     format!(
-                        "series [{}] is reserved for ADX scaffolds and is not yet compilable",
+                        "all series data_types must match; got `{existing}` vs `{}`",
                         s.name
                     ),
                     self.expr_src,
                     Some(s.pos),
                 ));
             }
-            "open" | "volume" => {
-                return Err(Error::sem(
-                    format!("series [{}] is not yet supported", s.name),
-                    self.expr_src,
-                    Some(s.pos),
-                ));
-            }
-            other => {
-                return Err(Error::sem(
-                    format!("unknown series [{other}]"),
-                    self.expr_src,
-                    Some(s.pos),
-                ));
-            }
         }
-        self.saw_series = true;
-        self.series_names.insert(s.name.clone());
 
         match &self.reporting_period {
             None => self.reporting_period = Some(s.bucket.clone()),
