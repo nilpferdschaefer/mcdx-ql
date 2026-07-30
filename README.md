@@ -65,7 +65,7 @@ The compiler restricts SQL emit bounds so trailing slices like `[-1]` do not sca
 Example — correlation of BTC vs ETH for 100 daily bars ending 15 May 2026:
 
 ```text
-REGR_SLOPE(
+REGR(
   RET([close.1d; 100@$end]),
   RET([close.1d@ETH; 100@$end]),
   $period
@@ -86,7 +86,27 @@ with `assets=["BTC"]`, `params.end` = bar-open ms for 2026-05-15, `params.period
 
 ### Builtins
 
-`AVG` `VAR` `STD` `COUNT` `RET` `TR` `EMA` `RMA` `RSI` `REGR_SLOPE` `SQRT` `GREATEST` `POWER` `ABS`
+`AVG` `VAR` `STD` `COUNT` `RET` `TR` `EMA` `RMA` `RSI` `REGR` (alias `REGR_SLOPE`) `SQRT` `GREATEST` `POWER` `ABS`
+
+**Regression (`REGR`)**
+
+`REGR(y, x, $period)` is the trailing `$period`-bar linear-regression slope of `y`
+on `x` (the classic beta). `REGR_SLOPE` is kept as an alias. Both compile to the
+Postgres `REGR_SLOPE(y, x)` window aggregate.
+
+```text
+REGR(
+  RET([close.1h; $from:$to]),            -- row asset returns  (y)
+  RET([close.1h@$benchmark; $from:$to]), -- benchmark returns  (x)
+  31
+)
+```
+
+is the 31-period 1h beta of the request asset against `$benchmark`. When an
+expression compares more than one asset, qualify each non-row series after `@`
+(literal ticker or `$param`); every qualified ticker gets its own `market_ret`
+CTE, so you can also regress two explicit tickers, e.g.
+`REGR(RET([close.1h@BTC; …]), RET([close.1h@ETH; …]), 31)`.
 
 ### Warmup (derived)
 
@@ -108,7 +128,7 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 | `atr_14` | `RMA(TR([close.1d; $from:$to]), $period)` |
 | `rsi_14` | `RSI([close.1d; $from:$to], $period)` |
 | `sep_atr` | `(AVG(…, $fast) - AVG(…, $slow)) / RMA(TR(…), $atr)` |
-| `beta_31` | `REGR_SLOPE(RET([close.1d; …]), RET([close.1d@$benchmark; …]), $period)` |
+| `beta_31` | `REGR(RET([close.1d; …]), RET([close.1d@$benchmark; …]), $period)` |
 
 `bb_14` (object mid/upper/lower) is deferred.
 
