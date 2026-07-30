@@ -115,8 +115,13 @@ pub enum EmitEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetRef {
-    /// Default: row asset from `params.coins`.
+    /// Implicit row asset (no `@`): the per-row asset from `params.coins`.
     Row,
+    /// Explicit row asset: `[close.1d@self; …]`. Behaves identically to `Row`,
+    /// but is required (instead of the implicit form) when an expression mixes
+    /// the row asset with an `@`-qualified series, so multi-asset comparisons are
+    /// always spelled out.
+    SelfRow,
     /// Literal ticker: `[close@TOTALCRYPTOMARKETCAP; …]`.
     Literal(String),
     /// Param ticker: `[close@$benchmark; …]`.

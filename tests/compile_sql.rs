@@ -100,7 +100,7 @@ fn trailing_bars_ending_at_date() {
     // 100 daily bars ending 2026-05-15 UTC (bar open ms)
     let end = 1_778_803_200_000_i64;
     let mut r = req(
-        "REGR_SLOPE(RET([close.1d; 100@$end]), RET([close.1d@$b; 100@$end]), $period)",
+        "REGR_SLOPE(RET([close.1d@self; 100@$end]), RET([close.1d@$b; 100@$end]), $period)",
     );
     r.params.insert("end".into(), ParamValue::Int(end));
     r.params.insert("b".into(), ParamValue::Text("ETH".into()));
@@ -210,7 +210,7 @@ fn compiles_std_of_ret() {
 #[test]
 fn compiles_market_qualifier() {
     let q = compile(&req(
-        "REGR_SLOPE(RET([close.1d; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
+        "REGR_SLOPE(RET([close.1d@self; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
     ))
     .unwrap();
     assert!(q.sql.contains("market_ret AS ("));
@@ -252,7 +252,7 @@ fn worked_mapping_sep_atr() {
 #[test]
 fn worked_mapping_beta_31() {
     let mut r = req(
-        "REGR_SLOPE(RET([close.1d; $from:$to]), RET([close.1d@$benchmark; $from:$to]), $period)",
+        "REGR_SLOPE(RET([close.1d@self; $from:$to]), RET([close.1d@$benchmark; $from:$to]), $period)",
     );
     r.params.insert("period".into(), ParamValue::Int(31));
     r.params
@@ -265,7 +265,7 @@ fn worked_mapping_beta_31() {
 fn compiles_regr_alias_1h_31() {
     // User-facing REGR spelling: 31-period 1h beta vs a benchmark param.
     let mut r = req(
-        "REGR(RET([close.1h; $from:$to]), RET([close.1h@$benchmark; $from:$to]), 31)",
+        "REGR(RET([close.1h@self; $from:$to]), RET([close.1h@$benchmark; $from:$to]), 31)",
     );
     r.params
         .insert("benchmark".into(), ParamValue::Text("TOTALCRYPTOMARKETCAP".into()));
@@ -281,15 +281,41 @@ fn compiles_regr_alias_1h_31() {
 fn regr_matches_regr_slope() {
     // REGR is a pure alias — identical SQL to REGR_SLOPE for the same expression.
     let regr = compile(&req(
-        "REGR(RET([close.1d; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
+        "REGR(RET([close.1d@self; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
     ))
     .unwrap();
     let regr_slope = compile(&req(
-        "REGR_SLOPE(RET([close.1d; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
+        "REGR_SLOPE(RET([close.1d@self; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
     ))
     .unwrap();
     assert_eq!(regr.sql, regr_slope.sql);
     assert_eq!(regr.binds, regr_slope.binds);
+}
+
+#[test]
+fn self_row_matches_implicit_row_single_series() {
+    // `@self` is codegen-identical to the implicit row asset when no other
+    // asset is referenced.
+    let explicit = compile(&req("AVG([close.1d@self; $from:$to], $period)")).unwrap();
+    let implicit = compile(&req("AVG([close.1d; $from:$to], $period)")).unwrap();
+    assert_eq!(explicit.sql, implicit.sql);
+    assert_eq!(explicit.binds, implicit.binds);
+}
+
+#[test]
+fn rejects_mixed_implicit_and_qualified_series() {
+    // Implicit row series mixed with an `@`-qualified benchmark must be rejected.
+    let mut r = req(
+        "REGR(RET([close.1h; $from:$to]), RET([close.1h@$benchmark; $from:$to]), 31)",
+    );
+    r.params
+        .insert("benchmark".into(), ParamValue::Text("TOTALCRYPTOMARKETCAP".into()));
+    let err = compile(&r).unwrap_err();
+    assert!(
+        err.message.contains("@self") && err.message.contains("more than one asset"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
