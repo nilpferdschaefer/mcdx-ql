@@ -831,6 +831,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_regr_alias() {
+        let e = parse_expr(
+            "REGR(RET([close.1h; $from:$to]), RET([close.1h@$benchmark; $from:$to]), 31)",
+        )
+        .unwrap();
+        match e {
+            Expr::Call {
+                op: CallOp::RegrSlope,
+                args,
+                window: Some(WindowSpec::Trailing {
+                    period: TrailingPeriod::Int { value: 31, .. },
+                }),
+                ..
+            } => assert_eq!(args.len(), 2),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_batch() {
         let b = parse_batch(
             "{ sma_14: AVG([close.1d; $from:$to], 14), ema_14: EMA([close.1d; $from:$to], 14) }",

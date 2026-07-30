@@ -555,7 +555,7 @@ impl<'a> AnalyzeCtx<'a> {
                 self.needs_bar_ret = true;
                 if args.len() != 2 {
                     return Err(Error::sem(
-                        "REGR_SLOPE expects (y, x) plus window",
+                        "REGR expects (y, x) plus a period window, e.g. REGR(RET([close.1h; …]), RET([close.1h@$benchmark; …]), 31)",
                         self.expr_src,
                         Some(pos),
                     ));

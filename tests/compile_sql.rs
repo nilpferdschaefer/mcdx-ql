@@ -262,6 +262,55 @@ fn worked_mapping_beta_31() {
 }
 
 #[test]
+fn compiles_regr_alias_1h_31() {
+    // User-facing REGR spelling: 31-period 1h beta vs a benchmark param.
+    let mut r = req(
+        "REGR(RET([close.1h; $from:$to]), RET([close.1h@$benchmark; $from:$to]), 31)",
+    );
+    r.params
+        .insert("benchmark".into(), ParamValue::Text("TOTALCRYPTOMARKETCAP".into()));
+    let q = compile(&r).unwrap();
+    assert_eq!(q.reporting_period, "1h");
+    assert_eq!(q.max_lookback, 31);
+    assert!(q.scaffolds.bar_ret);
+    assert!(q.sql.contains("REGR_SLOPE(e.bar_ret, m.market_ret) OVER w_regr_1h_31"));
+    assert!(q.sql.contains("market_ret AS ("));
+}
+
+#[test]
+fn regr_matches_regr_slope() {
+    // REGR is a pure alias — identical SQL to REGR_SLOPE for the same expression.
+    let regr = compile(&req(
+        "REGR(RET([close.1d; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
+    ))
+    .unwrap();
+    let regr_slope = compile(&req(
+        "REGR_SLOPE(RET([close.1d; $from:$to]), RET([close.1d@TOTALCRYPTOMARKETCAP; $from:$to]), $period)",
+    ))
+    .unwrap();
+    assert_eq!(regr.sql, regr_slope.sql);
+    assert_eq!(regr.binds, regr_slope.binds);
+}
+
+#[test]
+fn compiles_regr_two_qualified_series() {
+    // Both series qualified after `@` → each ticker gets its own market_ret CTE.
+    let q = compile(&req(
+        "REGR(RET([close.1h@BTC; $from:$to]), RET([close.1h@ETH; $from:$to]), 31)",
+    ))
+    .unwrap();
+    assert!(q.scaffolds.bar_ret);
+    assert_eq!(q.scaffolds.market_tickers.len(), 2);
+    assert!(q.sql.contains("market_ret_btc AS ("));
+    assert!(q.sql.contains("market_ret_eth AS ("));
+    assert!(q
+        .sql
+        .contains("REGR_SLOPE(m_btc.market_ret, m_eth.market_ret) OVER w_regr_1h_31"));
+    assert!(q.sql.contains("LEFT JOIN market_ret_btc m_btc"));
+    assert!(q.sql.contains("LEFT JOIN market_ret_eth m_eth"));
+}
+
+#[test]
 fn rejects_unknown_series() {
     let err = compile(&req("AVG([cloze.1d; $from:$to], $period)")).unwrap_err();
     assert!(err.message.contains("unknown series [cloze]"));

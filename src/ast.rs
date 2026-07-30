@@ -188,7 +188,9 @@ impl CallOp {
             "EMA" => Self::Ema,
             "RMA" => Self::Rma,
             "RSI" => Self::Rsi,
-            "REGR_SLOPE" => Self::RegrSlope,
+            // `REGR` is the primary regression spelling; `REGR_SLOPE` stays as a
+            // backwards-compatible alias. Both map to the SQL `REGR_SLOPE` builtin.
+            "REGR" | "REGR_SLOPE" => Self::RegrSlope,
             "SQRT" => Self::Sqrt,
             "GREATEST" => Self::Greatest,
             "POWER" => Self::Power,
