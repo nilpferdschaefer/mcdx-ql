@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{
-    AssetRef, BatchExpr, CallOp, EmitCount, EmitEnd, Expr, IndexSelector, LookbackBound, Series,
-    SeriesDomain, TrailingPeriod, WindowSpec,
+    AssetRef, BatchExpr, CallOp, DomainBound, EmitCount, EmitEnd, Expr, IndexSelector,
+    LookbackBound, Series, SeriesDomain, TrailingPeriod, WindowSpec,
 };
 use crate::error::Error;
 use crate::interval::interval_ms;
@@ -101,6 +101,7 @@ pub fn analyze(
         series_names: BTreeSet::new(),
         implicit_row_positions: Vec::new(),
         has_qualified_series: false,
+        range_scope: None,
     };
 
     match batch {
@@ -235,6 +236,9 @@ struct AnalyzeCtx<'a> {
     implicit_row_positions: Vec<usize>,
     /// Whether any series is `@`-qualified (literal ticker or `$param`).
     has_qualified_series: bool,
+    /// Set to the byte offset of an enclosing `expr[$from:$to]` while walking its
+    /// subtree; descendants inherit that range and may not declare their own.
+    range_scope: Option<usize>,
 }
 
 impl<'a> AnalyzeCtx<'a> {
@@ -271,6 +275,20 @@ impl<'a> AnalyzeCtx<'a> {
             Expr::BinOp { left, right, .. } => {
                 self.walk_expr(left)?;
                 self.walk_expr(right)
+            }
+            Expr::Index {
+                base,
+                selector: IndexSelector::Range { from, to },
+                pos,
+            } => {
+                // Emit-range override: fix the range up front so descendant
+                // series inherit it, then walk the subtree under that scope.
+                let resolved = self.resolve_absolute_domain(from, to)?;
+                self.unify_domain(resolved, *pos)?;
+                let saved = self.range_scope.replace(*pos);
+                self.walk_expr(base)?;
+                self.range_scope = saved;
+                Ok(())
             }
             Expr::Index {
                 base,
@@ -367,32 +385,31 @@ impl<'a> AnalyzeCtx<'a> {
             }
         }
 
-        let resolved = match &s.domain {
-            None => Domain::Full,
-            Some(SeriesDomain::Absolute { from, to }) => {
-                let from_v = self.require_param(&from.name, Some(from.pos))?;
-                let to_v = self.require_param(&to.name, Some(to.pos))?;
-                let from_ms = from_v.as_i64().ok_or_else(|| {
-                    Error::sem(
-                        format!("domain param `${}` must be integer epoch-ms", from.name),
-                        self.expr_src,
-                        Some(from.pos),
-                    )
-                })?;
-                let to_ms = to_v.as_i64().ok_or_else(|| {
-                    Error::sem(
-                        format!("domain param `${}` must be integer epoch-ms", to.name),
-                        self.expr_src,
-                        Some(to.pos),
-                    )
-                })?;
-                Domain::Absolute {
-                    from_param: from.name.clone(),
-                    to_param: to.name.clone(),
-                    from_ms,
-                    to_ms,
-                }
+        // A series carrying its own range while an enclosing `[$from:$to]` is in
+        // effect is rejected (also caught at parse time; kept as a safety net).
+        if s.domain.is_some() {
+            if let Some(scope) = self.range_scope {
+                return Err(Error::sem(
+                    format!(
+                        "this series specifies a range, but an enclosing `[$from:$to]` (at byte {scope}) already set one; specify the range at only one level"
+                    ),
+                    self.expr_src,
+                    Some(s.pos),
+                ));
             }
+        }
+
+        let resolved = match &s.domain {
+            None => {
+                // With an enclosing range in scope, inherit it (contribute
+                // nothing). Otherwise this series is "full" and must unify with
+                // any sibling-declared range.
+                if self.range_scope.is_some() {
+                    return Ok(());
+                }
+                Domain::Full
+            }
+            Some(SeriesDomain::Absolute { from, to }) => self.resolve_absolute_domain(from, to)?,
             Some(SeriesDomain::TrailingBars { count, end, pos }) => {
                 let bars = self.resolve_emit_count(count)?;
                 if bars < 1 {
@@ -439,6 +456,37 @@ impl<'a> AnalyzeCtx<'a> {
 
         self.unify_domain(resolved, s.pos)?;
         Ok(())
+    }
+
+    /// Resolve an absolute `$from:$to` range (from a series domain or a postfix
+    /// `[$from:$to]`) into a `Domain::Absolute`, binding the epoch-ms params.
+    fn resolve_absolute_domain(
+        &mut self,
+        from: &DomainBound,
+        to: &DomainBound,
+    ) -> Result<Domain, Error> {
+        let from_v = self.require_param(&from.name, Some(from.pos))?;
+        let to_v = self.require_param(&to.name, Some(to.pos))?;
+        let from_ms = from_v.as_i64().ok_or_else(|| {
+            Error::sem(
+                format!("domain param `${}` must be integer epoch-ms", from.name),
+                self.expr_src,
+                Some(from.pos),
+            )
+        })?;
+        let to_ms = to_v.as_i64().ok_or_else(|| {
+            Error::sem(
+                format!("domain param `${}` must be integer epoch-ms", to.name),
+                self.expr_src,
+                Some(to.pos),
+            )
+        })?;
+        Ok(Domain::Absolute {
+            from_param: from.name.clone(),
+            to_param: to.name.clone(),
+            from_ms,
+            to_ms,
+        })
     }
 
     fn resolve_emit_count(&mut self, count: &EmitCount) -> Result<i32, Error> {
@@ -760,6 +808,9 @@ fn apply_selector(
     pos: usize,
 ) -> Result<Domain, Error> {
     match selector {
+        // Range overrides are resolved in `walk_expr` before any result slice,
+        // never routed through `apply_selector`.
+        IndexSelector::Range { .. } => Ok(domain),
         IndexSelector::Index(i) => {
             if *i == 0 {
                 return Err(Error::sem(

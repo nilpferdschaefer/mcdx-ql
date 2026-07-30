@@ -337,6 +337,80 @@ fn compiles_regr_two_qualified_series() {
 }
 
 #[test]
+fn postfix_range_matches_inline_domains() {
+    // Applying `[$from:$to]` on the whole REGR is equivalent to repeating the
+    // range on every child series — descendants inherit it.
+    let mut inline = req(
+        "REGR(RET([close.1d@self; $from:$to]), RET([close.1d@$b; $from:$to]), $period)",
+    );
+    inline.params.insert("b".into(), ParamValue::Text("ETH".into()));
+    inline.params.insert("period".into(), ParamValue::Int(31));
+
+    let mut postfix = req(
+        "REGR(RET([close.1d@self]), RET([close.1d@$b]), $period)[$from:$to]",
+    );
+    postfix.params.insert("b".into(), ParamValue::Text("ETH".into()));
+    postfix.params.insert("period".into(), ParamValue::Int(31));
+
+    let qi = compile(&inline).unwrap();
+    let qp = compile(&postfix).unwrap();
+    assert_eq!(qp.sql, qi.sql);
+    assert_eq!(qp.binds, qi.binds);
+    assert_eq!(
+        qp.domain,
+        Domain::Absolute {
+            from_param: "from".into(),
+            to_param: "to".into(),
+            from_ms: 1_700_000_000_000,
+            to_ms: 1_700_086_400_000,
+        }
+    );
+}
+
+#[test]
+fn compiles_postfix_range_on_avg() {
+    // Range applied to a single-series expression sets the absolute emit domain.
+    let q = compile(&req("AVG([close.1d], $period)[$from:$to]")).unwrap();
+    assert_eq!(
+        q.domain,
+        Domain::Absolute {
+            from_param: "from".into(),
+            to_param: "to".into(),
+            from_ms: 1_700_000_000_000,
+            to_ms: 1_700_086_400_000,
+        }
+    );
+    assert_eq!(q.binds[1], BindValue::BigInt(1_700_000_000_000));
+    assert_eq!(q.binds[2], BindValue::BigInt(1_700_086_400_000));
+    assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_14"));
+    assert!(q.sql.contains("p.dirty_from AS emit_from"));
+}
+
+#[test]
+fn rejects_nested_range_series_and_postfix() {
+    // Inner series range + outer postfix range → conflict, rejected at parse.
+    let mut r = req(
+        "REGR(RET([close.1d@self; $from:$to]), RET([close.1d@$b]), $period)[$from:$to]",
+    );
+    r.params.insert("b".into(), ParamValue::Text("ETH".into()));
+    r.params.insert("period".into(), ParamValue::Int(31));
+    let err = compile(&r).unwrap_err();
+    assert_eq!(err.code.as_str(), "parse_error");
+    assert!(
+        err.message.contains("only one level"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn rejects_double_postfix_range() {
+    let err = compile(&req("AVG([close.1d], 14)[$from:$to][$from:$to]")).unwrap_err();
+    assert_eq!(err.code.as_str(), "parse_error");
+    assert!(err.message.contains("only one level"), "{}", err.message);
+}
+
+#[test]
 fn rejects_unknown_series() {
     let err = compile(&req("AVG([cloze.1d; $from:$to], $period)")).unwrap_err();
     assert!(err.message.contains("unknown series [cloze]"));

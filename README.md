@@ -40,6 +40,7 @@ let q = compile(&CompileRequest {
 | Full series (no domain) | `[close.1d]` → largest possible result series from available data |
 | Result index / slice | `AVG([close.1d], 14)[-1]`, `…[4]`, `…[-10:-1]`, `…[4:10]` |
 | Series @ asset | `[close.1d@self]`, `[close.1d@ETH; 100@$end]`, `[close.1d@$benchmark]` |
+| Inherited range (postfix) | `REGR(RET([close.1h@self]), RET([close.1h@$b]), 31)[$from:$to]` |
 | Trailing window sugar | `AVG([close.1d; 100@$end], $period)` ≡ `AVG(…, t-($period-1), t)` |
 | Lookback | `t`, `t0`, `t-INT`, `t-($period-1)` |
 | Batch | `{ sma_14: AVG([close.1d], 14)[-1], … }` |
@@ -59,7 +60,7 @@ The compiler restricts SQL emit bounds so trailing slices like `[-1]` do not sca
 
 **Emit domain vs lookback**
 
-- **Emit domain** (`$from:$to`, `N@$end`, `N@latest`, omitted=full, or a result slice) chooses which bars appear in the result — backpopulate a whole range in **one** query.
+- **Emit domain** (`$from:$to`, `N@$end`, `N@latest`, a postfix `expr[$from:$to]`, omitted=full, or a result slice) chooses which bars appear in the result — backpopulate a whole range in **one** query.
 - **Lookback** (`$period` / `t-(N-1), t`) is the window used **at each emit bar** (e.g. 31 for beta).
 
 Example — correlation of BTC vs ETH for 100 daily bars ending 15 May 2026:
@@ -74,11 +75,32 @@ REGR(
 
 with `assets=["BTC"]`, `params.end` = bar-open ms for 2026-05-15, `params.period=31`. Returns up to 100 rows (then `limit` / `after_ts`). `@self` is the row asset (`BTC`); it must be explicit because the expression also references `@ETH`.
 
+**Inherited range (postfix `[$from:$to]`)**
+
+Instead of repeating the range on every series, you can apply it once as a
+postfix at any expression level; every descendant series inherits it:
+
+```text
+REGR(
+  RET([close.1h@self]),
+  RET([close.1h@$benchmark]),
+  31
+)[$from:$to]
+```
+
+is exactly equivalent to writing `; $from:$to` inside each series. The range is
+distinguished from integer result slices (`[-1]`, `[4:10]`) by the leading `$`.
+
+A range may be specified at **only one level** along any path: if a parent
+`[$from:$to]` is present, a descendant series (or nested `[$from:$to]`) may not
+also declare one. Doing so is a syntax error pointing at the conflict.
+
 **Rules**
 
 - Bucket (`.1d` / `.1h` / …) is **required** on every series; all buckets in one expr must match.
 - Domain is optional; omit it for the full possible series. Use `[-1]` for the latest value, or `N@$end` / `N@latest` for backfills.
 - All series domains (and result slices) in one expr must resolve to the same emit range.
+- A postfix `expr[$from:$to]` sets the emit range for the whole subtree; descendants inherit it and may not also declare a range (enforced at parse time).
 - Bare series names / bare identifiers are illegal — series need `[]`, params need `$`.
 - Once any series is `@`-qualified, every series must be qualified (`@self` / `@TICKER` / `@$name`); mixing an implicit row series with a qualified one is rejected.
 - `$name` values come only from request `params` (missing → fail loud).
