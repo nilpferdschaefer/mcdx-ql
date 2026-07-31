@@ -1,8 +1,8 @@
 # mcdx-ql
 
-Compile MCDX indicator expression grammar into the joint-analytics SQL envelope that runs against `core.data`.
+Compile MCDX indicator expression grammar into the joint-analytics SQL envelope that runs against a SQL database.
 
-This crate is **SQL generation only** — no HTTP, no DB I/O. The datastore read-api (or analytics) owns execution and the response envelope (`ok`, `rows`, pagination).
+This crate is **SQL generation only** — no HTTP, no DB I/O. The caller owns execution and the response envelope (`ok`, `rows`, pagination).
 
 ## Quick start
 
@@ -206,7 +206,7 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 - `binds` — eight positional parameters; `dirty_from`/`dirty_to` are set only for absolute domains
 - `reporting_period` — derived from series bucket (e.g. `1d`)
 - `source` — unaggregated source label when present (e.g. `binance`); omitted for aggregated series
-- `params_hash` — datastore params fingerprint used in SQL filters
+- `params_hash` — params fingerprint used in SQL filters
 - `domain` — `Absolute` / `Full` / `TrailingLatest` / `FromStart`
 - `max_lookback` — pads scan before `emit_from`
 - `scaffolds` / `indicators` — as before
