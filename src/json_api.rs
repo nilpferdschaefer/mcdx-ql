@@ -150,6 +150,9 @@ pub struct CompiledQueryJson {
     pub sql: String,
     pub binds: Vec<BindValueJson>,
     pub reporting_period: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub params_hash: String,
     pub expr: String,
     pub domain: DomainJson,
     pub indicators: Vec<String>,
@@ -164,6 +167,8 @@ impl From<&CompiledQuery> for CompiledQueryJson {
             sql: q.sql.clone(),
             binds: q.binds.iter().map(BindValueJson::from).collect(),
             reporting_period: q.reporting_period.clone(),
+            source: q.source.clone(),
+            params_hash: q.params_hash.clone(),
             expr: q.expr.clone(),
             domain: DomainJson::from(&q.domain),
             indicators: q.indicators.clone(),
@@ -249,23 +254,29 @@ pub fn compile_json(request_json: &str) -> String {
     };
 
     match compile(&req) {
-        Ok(q) => serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "sql": q.sql,
-            "binds": q.binds.iter().map(BindValueJson::from).collect::<Vec<_>>(),
-            "reporting_period": q.reporting_period,
-            "expr": q.expr,
-            "domain": DomainJson::from(&q.domain),
-            "indicators": q.indicators,
-            "max_lookback": q.max_lookback,
-            "scaffolds": ScaffoldsJson::from(&q.scaffolds),
-            "interval_ms": q.interval_ms,
-        }))
-        .unwrap_or_else(|e| {
-            format!(
-                r#"{{"ok":false,"error":{{"code":"compile_error","message":"json encode failed: {e}","expr":""}}}}"#
-            )
-        }),
+        Ok(q) => {
+            let mut body = serde_json::json!({
+                "ok": true,
+                "sql": q.sql,
+                "binds": q.binds.iter().map(BindValueJson::from).collect::<Vec<_>>(),
+                "reporting_period": q.reporting_period,
+                "params_hash": q.params_hash,
+                "expr": q.expr,
+                "domain": DomainJson::from(&q.domain),
+                "indicators": q.indicators,
+                "max_lookback": q.max_lookback,
+                "scaffolds": ScaffoldsJson::from(&q.scaffolds),
+                "interval_ms": q.interval_ms,
+            });
+            if let Some(source) = q.source {
+                body["source"] = serde_json::Value::String(source);
+            }
+            serde_json::to_string(&body).unwrap_or_else(|e| {
+                format!(
+                    r#"{{"ok":false,"error":{{"code":"compile_error","message":"json encode failed: {e}","expr":""}}}}"#
+                )
+            })
+        }
         Err(e) => serde_json::to_string(&CompileResponseJson::Err {
             ok: false,
             error: ErrorJson::from(&e),
@@ -293,6 +304,32 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert!(v["sql"].as_str().unwrap().contains("AVG(e.close)"));
         assert_eq!(v["reporting_period"], "1d");
+        assert!(v.get("source").is_none());
+        assert_eq!(
+            v["params_hash"],
+            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        );
+    }
+
+    #[test]
+    fn compile_json_unaggregated_source() {
+        let req = r#"{
+            "expr": "AVG([binance:close.1d; $from:$to], $period)",
+            "assets": ["BTC"],
+            "params": {"period": 14, "from": 100, "to": 200}
+        }"#;
+        let out = compile_json(req);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["source"], "binance");
+        assert_eq!(
+            v["params_hash"],
+            "691508c082c9c6b7be0aaed0f8a914bca6e8b2333ffadd9b297f367d4e83aa87"
+        );
+        assert!(v["sql"]
+            .as_str()
+            .unwrap()
+            .contains("params_hash = '691508c082c9c6b7be0aaed0f8a914bca6e8b2333ffadd9b297f367d4e83aa87'"));
     }
 
     #[test]

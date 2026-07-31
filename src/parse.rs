@@ -372,24 +372,42 @@ impl<'a> Parser<'a> {
     fn parse_series(&mut self) -> Result<Expr, Error> {
         let pos = self.peek().pos;
         self.advance(); // [
-        let name_tok = self.advance();
-        let name = match name_tok.kind {
+        let first_tok = self.advance();
+        let first = match first_tok.kind {
             TokenKind::Ident(s) => s,
             TokenKind::Dollar => {
                 return Err(self.err(
                     "a range `[$from:$to]` is not a standalone value — apply it as a postfix to an expression, e.g. `REGR(…, …, 31)[$from:$to]`",
-                    Some(name_tok.pos),
+                    Some(first_tok.pos),
                 ));
             }
             _ => {
-                return Err(self.err("expected series name", Some(name_tok.pos)));
+                return Err(self.err("expected series name", Some(first_tok.pos)));
             }
+        };
+
+        // Optional unaggregated source: `[binance:close.1d]`
+        let (source, name) = if matches!(self.peek().kind, TokenKind::Colon) {
+            self.advance(); // :
+            let name_tok = self.advance();
+            let name = match name_tok.kind {
+                TokenKind::Ident(s) => s,
+                _ => {
+                    return Err(self.err(
+                        "expected series name after `source:` — e.g. `[binance:close.1d]`",
+                        Some(name_tok.pos),
+                    ));
+                }
+            };
+            (Some(first), name)
+        } else {
+            (None, first)
         };
 
         // Required bucket: `.1d` / `.1h` / `.5m` …
         if !matches!(self.peek().kind, TokenKind::Dot) {
             return Err(self.err(
-                "series bucket required — expected `[close.1d]` / `[close.1h]` style",
+                "series bucket required — expected `[close.1d]` / `[binance:close.1d]` style",
                 Some(self.peek().pos),
             ));
         }
@@ -451,6 +469,7 @@ impl<'a> Parser<'a> {
         self.advance();
 
         Ok(Expr::Series(Series {
+            source,
             name,
             bucket,
             asset,
@@ -930,6 +949,45 @@ mod tests {
     fn rejects_missing_bucket() {
         let err = parse_expr("AVG([close; $from:$to], $period)").unwrap_err();
         assert!(err.message.contains("bucket required"));
+    }
+
+    #[test]
+    fn parses_unaggregated_source() {
+        let e = parse_expr("[binance:close.1d]").unwrap();
+        match e {
+            Expr::Series(s) => {
+                assert_eq!(s.source.as_deref(), Some("binance"));
+                assert_eq!(s.name, "close");
+                assert_eq!(s.bucket, "1d");
+                assert_eq!(s.asset, AssetRef::Row);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_unaggregated_source_with_asset_and_domain() {
+        let e = parse_expr("[binance:close.1h@self; $from:$to]").unwrap();
+        match e {
+            Expr::Series(s) => {
+                assert_eq!(s.source.as_deref(), Some("binance"));
+                assert_eq!(s.name, "close");
+                assert_eq!(s.bucket, "1h");
+                assert_eq!(s.asset, AssetRef::SelfRow);
+                assert!(matches!(s.domain, Some(SeriesDomain::Absolute { .. })));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_source_without_series_name() {
+        let err = parse_expr("[binance:.1d]").unwrap_err();
+        assert!(
+            err.message.contains("expected series name after `source:`"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

@@ -10,7 +10,6 @@ use crate::error::Error;
 use crate::interval::interval_ms;
 use crate::parse::parse_batch;
 use crate::sem::{analyze, Analysis, Domain, ParamValue};
-use crate::EMPTY_PARAMS_HASH;
 
 /// Request inputs for compilation (mirrors the read-api request minus HTTP concerns).
 #[derive(Debug, Clone)]
@@ -54,6 +53,11 @@ pub struct CompiledQuery {
     /// Positional binds matching `?` placeholders in order.
     pub binds: Vec<BindValue>,
     pub reporting_period: String,
+    /// Unaggregated source label (`binance` in `[binance:close.1d]`), or `None`
+    /// for aggregated / canonical series.
+    pub source: Option<String>,
+    /// Datastore `params_hash` used in the SQL scan filters.
+    pub params_hash: String,
     pub expr: String,
     pub domain: Domain,
     pub indicators: Vec<String>,
@@ -149,6 +153,7 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
 
     let sql = render_envelope(
         &reporting_period,
+        &analysis.params_hash,
         interval,
         &scaffolds,
         &named_windows,
@@ -180,6 +185,8 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         sql,
         binds,
         reporting_period,
+        source: analysis.source.clone(),
+        params_hash: analysis.params_hash.clone(),
         expr: req.expr.clone(),
         domain: analysis.domain.clone(),
         indicators,
@@ -762,7 +769,12 @@ fn rsi_sql(closes_arr: &str, period: i32) -> String {
 }
 
 /// Bounds CTE: absolute uses dirty_* binds; other domains resolve from available data.
-fn render_bounds_cte(domain: &Domain, reporting_period: &str, interval_ms: i64) -> String {
+fn render_bounds_cte(
+    domain: &Domain,
+    reporting_period: &str,
+    params_hash: &str,
+    interval_ms: i64,
+) -> String {
     let scan = format!(
         "CROSS JOIN LATERAL (\n\
          \x20   SELECT MIN(c.timestamp_start) AS min_ts,\n\
@@ -771,7 +783,7 @@ fn render_bounds_cte(domain: &Domain, reporting_period: &str, interval_ms: i64) 
          \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
          \x20   WHERE c.data_type = 'close'\n\
          \x20     AND c.reporting_period = '{reporting_period}'\n\
-         \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
+         \x20     AND c.params_hash = '{params_hash}'\n\
          \x20     AND a.canonical_ticker = ANY(p.coins)\n\
          \x20 ) l"
     );
@@ -855,6 +867,7 @@ fn render_bounds_cte(domain: &Domain, reporting_period: &str, interval_ms: i64) 
 
 fn render_envelope(
     reporting_period: &str,
+    params_hash: &str,
     interval_ms: i64,
     scaffolds: &Scaffolds,
     named_windows: &BTreeMap<String, i32>,
@@ -882,7 +895,7 @@ fn render_envelope(
     writeln!(
         sql,
         "{}",
-        render_bounds_cte(domain, reporting_period, interval_ms)
+        render_bounds_cte(domain, reporting_period, params_hash, interval_ms)
     )
     .unwrap();
 
@@ -905,7 +918,7 @@ fn render_envelope(
          \x20 CROSS JOIN bounds b\n\
          \x20 WHERE c.data_type = 'close'\n\
          \x20   AND c.reporting_period = '{reporting_period}'\n\
-         \x20   AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
+         \x20   AND c.params_hash = '{params_hash}'\n\
          \x20   AND a.canonical_ticker = ANY(p.coins)\n\
          \x20   AND c.timestamp_start >= b.emit_from - (p.max_lookback::bigint * {interval_ms})\n\
          \x20   AND c.timestamp_start <= b.emit_to\n\
@@ -985,7 +998,7 @@ fn render_envelope(
              \x20   CROSS JOIN bounds b\n\
              \x20   WHERE c.data_type = 'close'\n\
              \x20     AND c.reporting_period = '{reporting_period}'\n\
-             \x20     AND c.params_hash = '{EMPTY_PARAMS_HASH}'\n\
+             \x20     AND c.params_hash = '{params_hash}'\n\
              \x20     AND a.canonical_ticker = '{ticker}'\n\
              \x20     AND c.timestamp_start >= b.emit_from - (p.max_lookback::bigint * {interval_ms})\n\
              \x20     AND c.timestamp_start <= b.emit_to\n\

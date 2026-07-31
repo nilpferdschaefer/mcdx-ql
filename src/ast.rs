@@ -84,6 +84,10 @@ pub enum TrailingPeriod {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Series {
+    /// Optional exchange/source qualifier for unaggregated bars:
+    /// `[binance:close.1d]` → `source = Some("binance")`, `name = "close"`.
+    /// Aggregated / canonical series omit this (`[close.1d]`).
+    pub source: Option<String>,
     pub name: String,
     /// Bar bucket / reporting period suffix, e.g. `1d`, `1h`, `5m`.
     pub bucket: String,
