@@ -69,6 +69,11 @@ pub struct Analysis {
     pub domain: Domain,
     /// Unified bar bucket from series literals (`1d`, `1h`, …).
     pub reporting_period: String,
+    /// Unified unaggregated source (`binance` in `[binance:close.1d]`), or `None`
+    /// for aggregated / canonical series (`[close.1d]`).
+    pub source: Option<String>,
+    /// Datastore `params_hash` for the unified source (empty-params when aggregated).
+    pub params_hash: String,
     pub max_lookback: i32,
     pub needs_bar_ret: bool,
     pub needs_closes_to_date: bool,
@@ -90,6 +95,8 @@ pub fn analyze(
         expr_src,
         domain: None,
         reporting_period: None,
+        source: None,
+        saw_source: false,
         saw_series: false,
         max_lookback: 0,
         needs_bar_ret: false,
@@ -204,9 +211,14 @@ pub fn analyze(
         ));
     }
 
+    let source = ctx.source;
+    let params_hash = crate::params_hash_for_source(source.as_deref());
+
     Ok(Analysis {
         domain,
         reporting_period,
+        source,
+        params_hash,
         max_lookback: ctx.max_lookback.max(1),
         needs_bar_ret: ctx.needs_bar_ret,
         needs_closes_to_date: ctx.needs_closes_to_date,
@@ -223,6 +235,10 @@ struct AnalyzeCtx<'a> {
     expr_src: &'a str,
     domain: Option<Domain>,
     reporting_period: Option<String>,
+    /// Unified source once any series has been seen (`None` = aggregated).
+    source: Option<String>,
+    /// Whether at least one series has set [`Self::source`].
+    saw_source: bool,
     saw_series: bool,
     max_lookback: i32,
     needs_bar_ret: bool,
@@ -348,6 +364,29 @@ impl<'a> AnalyzeCtx<'a> {
         }
         self.saw_series = true;
         self.series_names.insert(s.name.clone());
+
+        if !self.saw_source {
+            self.source = s.source.clone();
+            self.saw_source = true;
+        } else if self.source != s.source {
+            let left = self
+                .source
+                .as_deref()
+                .map(|src| format!("[{src}:…]"))
+                .unwrap_or_else(|| "[…] (aggregated)".into());
+            let right = s
+                .source
+                .as_deref()
+                .map(|src| format!("[{src}:…]"))
+                .unwrap_or_else(|| "[…] (aggregated)".into());
+            return Err(Error::sem(
+                format!(
+                    "all series sources must match; got {left} vs {right}"
+                ),
+                self.expr_src,
+                Some(s.pos),
+            ));
+        }
 
         match &self.reporting_period {
             None => self.reporting_period = Some(s.bucket.clone()),
@@ -1251,6 +1290,8 @@ mod tests {
         let a = analyze(&batch, &params(14, 100, 200), src).unwrap();
         assert_eq!(a.max_lookback, 14);
         assert_eq!(a.reporting_period, "1d");
+        assert_eq!(a.source, None);
+        assert_eq!(a.params_hash, crate::EMPTY_PARAMS_HASH);
         match a.domain {
             Domain::Absolute {
                 from_ms, to_ms, ..
@@ -1260,6 +1301,26 @@ mod tests {
             }
             other => panic!("expected absolute, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn analyzes_unaggregated_source() {
+        let src = "AVG([binance:close.1d; $from:$to], $period)";
+        let batch = parse_batch(src).unwrap();
+        let a = analyze(&batch, &params(14, 100, 200), src).unwrap();
+        assert_eq!(a.source.as_deref(), Some("binance"));
+        assert_eq!(
+            a.params_hash,
+            crate::params_hash_for_source(Some("binance"))
+        );
+    }
+
+    #[test]
+    fn rejects_mixed_aggregated_and_source() {
+        let src = "AVG([binance:close.1d], 14) + AVG([close.1d], 14)";
+        let batch = parse_batch(src).unwrap();
+        let err = analyze(&batch, &BTreeMap::new(), src).unwrap_err();
+        assert!(err.message.contains("sources must match"), "{}", err.message);
     }
 
     #[test]

@@ -34,6 +34,7 @@ let q = compile(&CompileRequest {
 | Form | Example |
 |------|---------|
 | Series + bucket | `[close.1d]`, `[close.1h]`, `[close.5m]` |
+| Unaggregated source | `[binance:close.1d]`, `[coinbase:close.1h@self; $from:$to]` |
 | Absolute emit range | `[close.1d; $from:$to]` → one row per bar in range |
 | Trailing N bars to date | `[close.1d; 100@$end]` → 100 bars ending at `$end` (inclusive) |
 | Trailing N bars to latest | `[close.1d; 100@latest]` / `[close.1d; $n@latest]` |
@@ -111,9 +112,26 @@ A range may be specified at **only one level** along any path: if a parent
 (or nested `[$from:$to]`) may not also declare one. Doing so is a syntax error
 pointing at the conflict.
 
+**Unaggregated / source-qualified series**
+
+Aggregated (canonical) bars use a bare series name and the empty-params fingerprint:
+
+```text
+[close.1d]          → data_type = 'close', params_hash = SHA-256("{}")
+```
+
+Unaggregated bars carry an exchange/source label before the metric:
+
+```text
+[binance:close.1d]  → data_type = 'close', params_hash = SHA-256({"source":"binance"})
+```
+
+All series in one expression must share the same source (or all be aggregated). Bucket, `@` asset, and domain syntax are unchanged: `[binance:close.1h@self; $from:$to]`.
+
 **Rules**
 
 - Bucket (`.1d` / `.1h` / …) is **required** on every series; all buckets in one expr must match.
+- Optional `source:` prefix marks unaggregated bars; all sources in one expr must match.
 - Domain is optional; omit it for the full possible series. Use `[-1]` for the latest value, or `N@$end` / `N@latest` for backfills.
 - All series domains (and result slices) in one expr must resolve to the same emit range.
 - A postfix `expr[$from:$to]` (or `{ … }[$from:$to]` on a batch) sets the emit range for the whole subtree; descendants inherit it and may not also declare a range (enforced at parse time).
@@ -187,6 +205,8 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 - `sql` — CTE pipeline (`params` → `bounds` → `ordered` → `enriched` → optional `market_ret` → `windowed` → `unpivoted` → `ranked`)
 - `binds` — eight positional parameters; `dirty_from`/`dirty_to` are set only for absolute domains
 - `reporting_period` — derived from series bucket (e.g. `1d`)
+- `source` — unaggregated source label when present (e.g. `binance`); omitted for aggregated series
+- `params_hash` — datastore params fingerprint used in SQL filters
 - `domain` — `Absolute` / `Full` / `TrailingLatest` / `FromStart`
 - `max_lookback` — pads scan before `emit_from`
 - `scaffolds` / `indicators` — as before

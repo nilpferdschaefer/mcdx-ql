@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use mcdx_ql::{compile, BindValue, CompileRequest, Domain, ParamValue};
+use mcdx_ql::{
+    compile, params_hash_for_source, BindValue, CompileRequest, Domain, ParamValue,
+    EMPTY_PARAMS_HASH,
+};
 use pretty_assertions::assert_eq;
 
 fn base_params() -> BTreeMap<String, ParamValue> {
@@ -30,6 +33,8 @@ fn compiles_avg_trailing_sugar() {
     let q = compile(&req("AVG([close.1d; $from:$to], $period)")).unwrap();
     assert_eq!(q.max_lookback, 14);
     assert_eq!(q.reporting_period, "1d");
+    assert_eq!(q.source, None);
+    assert_eq!(q.params_hash, EMPTY_PARAMS_HASH);
     assert_eq!(
         q.domain,
         Domain::Absolute {
@@ -41,11 +46,51 @@ fn compiles_avg_trailing_sugar() {
     );
     assert_eq!(q.interval_ms, 86_400_000);
     assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_14"));
+    assert!(q.sql.contains(&format!("params_hash = '{EMPTY_PARAMS_HASH}'")));
     assert!(q.sql.contains("bounds AS ("));
     assert!(q.sql.contains("p.dirty_from AS emit_from"));
     assert!(q.sql.contains("p.dirty_to AS emit_to"));
     assert_eq!(q.binds[1], BindValue::BigInt(1_700_000_000_000));
     assert_eq!(q.binds[2], BindValue::BigInt(1_700_086_400_000));
+}
+
+#[test]
+fn compiles_unaggregated_source_series() {
+    let q = compile(&req("AVG([binance:close.1d; $from:$to], $period)")).unwrap();
+    let expected_hash = params_hash_for_source(Some("binance"));
+    assert_eq!(q.source.as_deref(), Some("binance"));
+    assert_eq!(q.params_hash, expected_hash);
+    assert_eq!(q.reporting_period, "1d");
+    assert!(q.sql.contains("data_type = 'close'"));
+    assert!(q.sql.contains(&format!("params_hash = '{expected_hash}'")));
+    assert!(!q.sql.contains(&format!("params_hash = '{EMPTY_PARAMS_HASH}'")));
+    assert!(q.sql.contains("AVG(e.close) OVER w_close_1d_14"));
+}
+
+#[test]
+fn compiles_unaggregated_multi_asset() {
+    let mut r = req(
+        "REGR(RET([binance:close.1h@self; $from:$to]), RET([binance:close.1h@$benchmark; $from:$to]), 31)",
+    );
+    r.params
+        .insert("benchmark".into(), ParamValue::Text("ETH".into()));
+    let q = compile(&r).unwrap();
+    let expected_hash = params_hash_for_source(Some("binance"));
+    assert_eq!(q.source.as_deref(), Some("binance"));
+    // Absolute domain: ordered scan + market CTE (bounds skips the data scan).
+    assert_eq!(
+        q.sql.matches(&format!("params_hash = '{expected_hash}'")).count(),
+        2
+    );
+}
+
+#[test]
+fn rejects_mixed_source_and_aggregated() {
+    let err = compile(&req(
+        "AVG([binance:close.1d; $from:$to], $period) + AVG([close.1d; $from:$to], $period)",
+    ))
+    .unwrap_err();
+    assert!(err.message.contains("sources must match"), "{}", err.message);
 }
 
 #[test]
