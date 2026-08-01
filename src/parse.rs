@@ -415,6 +415,28 @@ impl<'a> Parser<'a> {
         self.advance(); // .
         let bucket = self.parse_bucket(bucket_pos)?;
 
+        // Optional object field accessor: `[candles.1h->close]`.
+        let field = if matches!(self.peek().kind, TokenKind::Arrow) {
+            self.advance(); // ->
+            match &self.peek().kind {
+                TokenKind::Ident(_) => {
+                    let t = self.advance();
+                    match t.kind {
+                        TokenKind::Ident(s) => Some(s),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => {
+                    return Err(self.err(
+                        "expected object field name after `->` — e.g. `[candles.1h->close]`",
+                        Some(self.peek().pos),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+
         let asset = if matches!(self.peek().kind, TokenKind::At) {
             self.advance();
             match &self.peek().kind {
@@ -472,6 +494,7 @@ impl<'a> Parser<'a> {
             source,
             name,
             bucket,
+            field,
             asset,
             domain,
             pos,

@@ -23,6 +23,10 @@ pub struct CompileRequestJson {
     pub limit: i32,
     #[serde(default)]
     pub publish_from: Option<i64>,
+    /// Series stems stored in `core.obj` (object/candle values). Optional; the
+    /// caller resolves these from `core.series_slot`. Empty = all scalar.
+    #[serde(default)]
+    pub obj_data_types: Vec<String>,
 }
 
 fn default_after_ts() -> i64 {
@@ -227,6 +231,7 @@ impl CompileRequestJson {
             after_ts: self.after_ts,
             limit: self.limit,
             publish_from: self.publish_from,
+            obj_data_types: self.obj_data_types.into_iter().collect(),
         }
     }
 }

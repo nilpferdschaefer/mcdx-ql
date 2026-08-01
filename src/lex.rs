@@ -23,6 +23,8 @@ pub enum TokenKind {
     Dot,
     Plus,
     Minus,
+    /// `->` object field accessor: `[candles.1h->close]`.
+    Arrow,
     Star,
     Slash,
     Dollar,
@@ -98,8 +100,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, Error> {
                 TokenKind::Plus
             }
             '-' => {
-                i += 1;
-                TokenKind::Minus
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '>' {
+                    i += 2;
+                    TokenKind::Arrow
+                } else {
+                    i += 1;
+                    TokenKind::Minus
+                }
             }
             '*' => {
                 i += 1;
