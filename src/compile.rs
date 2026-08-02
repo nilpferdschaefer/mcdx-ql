@@ -1288,32 +1288,32 @@ fn render_obj_envelope(
          \x20 ) l"
     );
     match domain {
-        Domain::Absolute { .. } => write!(
+        Domain::Absolute { .. } => writeln!(
             sql,
-            "bounds AS (SELECT p.dirty_from AS emit_from, p.dirty_to AS emit_to FROM params p),\n"
+            "bounds AS (SELECT p.dirty_from AS emit_from, p.dirty_to AS emit_to FROM params p),"
         )
         .unwrap(),
-        Domain::Full => write!(
+        Domain::Full => writeln!(
             sql,
-            "bounds AS (SELECT l.min_ts AS emit_from, l.max_ts AS emit_to FROM params p {scan}),\n"
+            "bounds AS (SELECT l.min_ts AS emit_from, l.max_ts AS emit_to FROM params p {scan}),"
         )
         .unwrap(),
         Domain::TrailingLatest { bars, end_offset } => {
             let end_shift = *end_offset as i64 * interval_ms;
             if *bars == i32::MAX {
-                write!(sql, "bounds AS (SELECT l.min_ts AS emit_from, l.max_ts - {end_shift} AS emit_to FROM params p {scan}),\n").unwrap();
+                writeln!(sql, "bounds AS (SELECT l.min_ts AS emit_from, l.max_ts - {end_shift} AS emit_to FROM params p {scan}),").unwrap();
             } else {
                 let span = (*bars as i64 - 1) * interval_ms;
-                write!(sql, "bounds AS (SELECT (l.max_ts - {end_shift}) - {span} AS emit_from, l.max_ts - {end_shift} AS emit_to FROM params p {scan}),\n").unwrap();
+                writeln!(sql, "bounds AS (SELECT (l.max_ts - {end_shift}) - {span} AS emit_from, l.max_ts - {end_shift} AS emit_to FROM params p {scan}),").unwrap();
             }
         }
         Domain::FromStart { start, count } => {
             let start_shift = format!("l.min_ts + (({start} - 1)::bigint * {interval_ms})");
             if *count == i32::MAX {
-                write!(sql, "bounds AS (SELECT {start_shift} AS emit_from, l.max_ts AS emit_to FROM params p {scan}),\n").unwrap();
+                writeln!(sql, "bounds AS (SELECT {start_shift} AS emit_from, l.max_ts AS emit_to FROM params p {scan}),").unwrap();
             } else {
                 let span = (*count as i64 - 1) * interval_ms;
-                write!(sql, "bounds AS (SELECT {start_shift} AS emit_from, LEAST(l.max_ts, ({start_shift}) + {span}) AS emit_to FROM params p {scan}),\n").unwrap();
+                writeln!(sql, "bounds AS (SELECT {start_shift} AS emit_from, LEAST(l.max_ts, ({start_shift}) + {span}) AS emit_to FROM params p {scan}),").unwrap();
             }
         }
     }
