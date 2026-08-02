@@ -25,6 +25,7 @@ fn req(expr: &str) -> CompileRequest {
         after_ts: -1,
         limit: 16,
         publish_from: None,
+        obj_data_types: Default::default(),
     }
 }
 

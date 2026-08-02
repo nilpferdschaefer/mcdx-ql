@@ -90,9 +90,19 @@ pub fn analyze(
     params: &BTreeMap<String, ParamValue>,
     expr_src: &str,
 ) -> Result<Analysis, Error> {
+    analyze_obj(batch, params, expr_src, &BTreeSet::new())
+}
+
+pub fn analyze_obj(
+    batch: &BatchExpr,
+    params: &BTreeMap<String, ParamValue>,
+    expr_src: &str,
+    obj_data_types: &BTreeSet<String>,
+) -> Result<Analysis, Error> {
     let mut ctx = AnalyzeCtx {
         params,
         expr_src,
+        obj_data_types,
         domain: None,
         reporting_period: None,
         source: None,
@@ -233,6 +243,8 @@ pub fn analyze(
 struct AnalyzeCtx<'a> {
     params: &'a BTreeMap<String, ParamValue>,
     expr_src: &'a str,
+    /// Series stems stored in `core.obj` (accepted without the scalar allowlist).
+    obj_data_types: &'a BTreeSet<String>,
     domain: Option<Domain>,
     reporting_period: Option<String>,
     /// Unified source once any series has been seen (`None` = aggregated).
@@ -334,6 +346,9 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn walk_series(&mut self, s: &Series) -> Result<(), Error> {
+        // Object (core.obj) series bypass the scalar allowlist; they compile to a
+        // raw object fetch or a `->field` scalar projection in the obj envelope.
+        if !self.obj_data_types.contains(&s.name) {
         match s.name.as_str() {
             "close" => {}
             "high" | "low" => {
@@ -361,6 +376,7 @@ impl<'a> AnalyzeCtx<'a> {
                     Some(s.pos),
                 ));
             }
+        }
         }
         self.saw_series = true;
         self.series_names.insert(s.name.clone());

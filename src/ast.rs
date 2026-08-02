@@ -91,6 +91,10 @@ pub struct Series {
     pub name: String,
     /// Bar bucket / reporting period suffix, e.g. `1d`, `1h`, `5m`.
     pub bucket: String,
+    /// Object field accessor for `core.obj` series: `[candles.1h->close]` →
+    /// `field = Some("close")`, projecting one JSON key as a scalar. `None` on a
+    /// scalar `core.data` series, or on a bare object fetch `[candles.1h]`.
+    pub field: Option<String>,
     pub asset: AssetRef,
     /// Emit domain. `None` → largest possible result series from available data.
     pub domain: Option<SeriesDomain>,
