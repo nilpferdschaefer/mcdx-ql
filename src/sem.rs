@@ -243,7 +243,7 @@ pub fn analyze_obj(
 struct AnalyzeCtx<'a> {
     params: &'a BTreeMap<String, ParamValue>,
     expr_src: &'a str,
-    /// Series stems stored in `core.obj` (accepted without the scalar allowlist).
+    /// Series stems stored in `obj` (accepted without the scalar allowlist).
     obj_data_types: &'a BTreeSet<String>,
     domain: Option<Domain>,
     reporting_period: Option<String>,
@@ -346,7 +346,7 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn walk_series(&mut self, s: &Series) -> Result<(), Error> {
-        // Object (core.obj) series bypass the scalar allowlist; they compile to a
+        // Object (`obj`) series bypass the scalar allowlist; they compile to a
         // raw object fetch or a `->field` scalar projection in the obj envelope.
         if !self.obj_data_types.contains(&s.name) {
         match s.name.as_str() {

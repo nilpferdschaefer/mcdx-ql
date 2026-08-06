@@ -34,7 +34,7 @@ let q = compile(&CompileRequest {
 | Form | Example |
 |------|---------|
 | Series + bucket | `[close.1d]`, `[close.1h]`, `[close.5m]` |
-| Object series (raw fetch) | `[candles.1h]` → whole `core.obj` object per bar (result carries `object`, not `value`) |
+| Object series (raw fetch) | `[candles.1h]` → whole `obj` object per bar (result carries `object`, not `value`) |
 | Object field projection | `[candles.1h->close]` → one JSON key of the object as a scalar (`->field`) |
 | Unaggregated source | `[binance:close.1d]`, `[coinbase:close.1h@self; $from:$to]` |
 | Absolute emit range | `[close.1d; $from:$to]` → one row per bar in range |
