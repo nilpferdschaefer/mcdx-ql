@@ -26,10 +26,10 @@ pub struct CompileRequest {
     /// Max distinct `timestamp_start` ranks.
     pub limit: i32,
     pub publish_from: Option<i64>,
-    /// Series stems whose fact table is `core.obj` (object/candle values), as
-    /// resolved from `core.series_slot` by the caller. A referenced series whose
-    /// stem is in this set compiles against `core.obj` (raw object fetch, or a
-    /// scalar `->field` projection) instead of the default scalar `core.data`
+    /// Series stems whose fact table is `obj` (object/candle values), as
+    /// resolved from `series_slot` by the caller. A referenced series whose
+    /// stem is in this set compiles against `obj` (raw object fetch, or a
+    /// scalar `->field` projection) instead of the default scalar `data`
     /// path. Empty = every series is scalar (backwards-compatible default).
     pub obj_data_types: std::collections::BTreeSet<String>,
 }
@@ -109,10 +109,10 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         Error::compile(format!("{e}"), &req.expr)
     })?;
 
-    // Object (core.obj) series path. A referenced stem is an object series when
-    // the caller resolved it as `obj` in `core.series_slot`. When every series
+    // Object (`obj`) series path. A referenced stem is an object series when
+    // the caller resolved it as `obj` in `series_slot`. When every series
     // is an object series, compile the raw-fetch / `->field` envelope against
-    // core.obj; mixing object and scalar series in one query is not yet allowed.
+    // `obj`; mixing object and scalar series in one query is not yet allowed.
     let obj_stem_count = analysis
         .series_names
         .iter()
@@ -121,7 +121,7 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
     if obj_stem_count > 0 {
         if obj_stem_count != analysis.series_names.len() {
             return Err(Error::compile(
-                "cannot mix object (core.obj) and scalar (core.data) series in one query",
+                "cannot mix object and scalar series in one query",
                 &req.expr,
             ));
         }
@@ -137,7 +137,7 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
     if let Some(s) = series_refs.iter().find(|s| s.field.is_some()) {
         return Err(Error::compile(
             format!(
-                "`->{}` field accessor requires an object series; `{}` is a scalar (core.data) series",
+                "`->{}` field accessor requires an object series; `{}` is a scalar series",
                 s.field.as_deref().unwrap_or(""),
                 s.name
             ),
@@ -821,8 +821,8 @@ fn render_bounds_cte(
         "CROSS JOIN LATERAL (\n\
          \x20   SELECT MIN(c.timestamp_start) AS min_ts,\n\
          \x20          MAX(c.timestamp_start) AS max_ts\n\
-         \x20   FROM core.data c\n\
-         \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
+         \x20   FROM data c\n\
+         \x20   JOIN mcdx_asset a ON a.id = c.asset\n\
          \x20   WHERE c.data_type = 'close'\n\
          \x20     AND c.reporting_period = '{reporting_period}'\n\
          \x20     AND c.params_hash = '{params_hash}'\n\
@@ -954,8 +954,8 @@ fn render_envelope(
          \x20          - ((ROW_NUMBER() OVER (\n\
          \x20                 PARTITION BY c.asset ORDER BY c.timestamp_start) - 1)\n\
          \x20             * {interval_ms}) AS seg_key\n\
-         \x20 FROM core.data c\n\
-         \x20 JOIN core.mcdx_asset a ON a.id = c.asset\n\
+         \x20 FROM data c\n\
+         \x20 JOIN mcdx_asset a ON a.id = c.asset\n\
          \x20 CROSS JOIN params p\n\
          \x20 CROSS JOIN bounds b\n\
          \x20 WHERE c.data_type = 'close'\n\
@@ -1034,8 +1034,8 @@ fn render_envelope(
              \x20               ELSE c.value / LAG(c.value) OVER (\n\
              \x20                     PARTITION BY c.asset ORDER BY c.timestamp_start) - 1.0\n\
              \x20          END AS bar_ret\n\
-             \x20   FROM core.data c\n\
-             \x20   JOIN core.mcdx_asset a ON a.id = c.asset\n\
+             \x20   FROM data c\n\
+             \x20   JOIN mcdx_asset a ON a.id = c.asset\n\
              \x20   CROSS JOIN params p\n\
              \x20   CROSS JOIN bounds b\n\
              \x20   WHERE c.data_type = 'close'\n\
@@ -1155,7 +1155,7 @@ fn collect_series<'a>(expr: &'a Expr, out: &mut Vec<&'a Series>) {
     }
 }
 
-/// Compile a homogeneous object-series request against `core.obj`.
+/// Compile a homogeneous object-series request against `obj`.
 ///
 /// Each output must be a bare object series (raw object fetch → `value` is the
 /// JSON object as text) or a `->field` projection (→ `value` is one JSON key as
@@ -1198,7 +1198,7 @@ fn compile_obj_batch(
             }
             _ => {
                 return Err(Error::compile(
-                    "an object (core.obj) series cannot be wrapped in an operator yet; \
+                    "an object series cannot be wrapped in an operator yet; \
                      fetch the raw object or a `->field` scalar and compute downstream",
                     &req.expr,
                 ))
@@ -1255,7 +1255,7 @@ fn compile_obj_batch(
     })
 }
 
-/// Render the `core.obj` fetch envelope (same output columns + 8 binds as the
+/// Render the `obj` fetch envelope (same output columns + 8 binds as the
 /// scalar envelope). `cols` are `(indicator_name, value_text_sql)`.
 fn render_obj_envelope(
     reporting_period: &str,
@@ -1282,7 +1282,7 @@ fn render_obj_envelope(
     let scan = format!(
         "CROSS JOIN LATERAL (\n\
          \x20   SELECT MIN(o.timestamp_start) AS min_ts, MAX(o.timestamp_start) AS max_ts\n\
-         \x20   FROM core.obj o JOIN core.mcdx_asset a ON a.id = o.asset\n\
+         \x20   FROM obj o JOIN mcdx_asset a ON a.id = o.asset\n\
          \x20   WHERE o.data_type = '{stem_esc}' AND o.reporting_period = '{reporting_period}'\n\
          \x20     AND o.params_hash = '{params_hash}' AND a.canonical_ticker = ANY(p.coins)\n\
          \x20 ) l"
@@ -1330,7 +1330,7 @@ fn render_obj_envelope(
     }
     write!(
         sql,
-        "\n  FROM core.obj o JOIN core.mcdx_asset a ON a.id = o.asset\n\
+        "\n  FROM obj o JOIN mcdx_asset a ON a.id = o.asset\n\
          \x20 CROSS JOIN params p CROSS JOIN bounds b\n\
          \x20 WHERE o.data_type = '{stem_esc}' AND o.reporting_period = '{reporting_period}'\n\
          \x20   AND o.params_hash = '{params_hash}' AND a.canonical_ticker = ANY(p.coins)\n\

@@ -23,8 +23,8 @@ pub struct CompileRequestJson {
     pub limit: i32,
     #[serde(default)]
     pub publish_from: Option<i64>,
-    /// Series stems stored in `core.obj` (object/candle values). Optional; the
-    /// caller resolves these from `core.series_slot`. Empty = all scalar.
+    /// Series stems stored in `obj` (object/candle values). Optional; the
+    /// caller resolves these from `series_slot`. Empty = all scalar.
     #[serde(default)]
     pub obj_data_types: Vec<String>,
 }

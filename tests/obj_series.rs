@@ -1,5 +1,5 @@
-//! Compile tests for object (`core.obj`) series: raw fetch + `->field` projection.
-//! The `->` object accessor is additive — scalar `core.data` behaviour is unchanged
+//! Compile tests for object (`obj`) series: raw fetch + `->field` projection.
+//! The `->` object accessor is additive — scalar `data` behaviour is unchanged
 //! (covered by compile_sql.rs) and is only exercised here for object series.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,7 +14,7 @@ fn base_params() -> BTreeMap<String, ParamValue> {
 }
 
 /// Request with `candles` resolved as an object series (as the datastore would
-/// from `core.series_slot`).
+/// from `series_slot`).
 fn obj_req(expr: &str) -> CompileRequest {
     CompileRequest {
         expr: expr.to_string(),
@@ -29,13 +29,13 @@ fn obj_req(expr: &str) -> CompileRequest {
 }
 
 #[test]
-fn bare_object_series_fetches_from_core_obj() {
+fn bare_object_series_fetches_from_obj() {
     let q = compile(&obj_req("[candles.1h; $from:$to]")).unwrap();
-    assert!(q.sql.contains("FROM core.obj o"), "sql:\n{}", q.sql);
+    assert!(q.sql.contains("FROM obj o"), "sql:\n{}", q.sql);
     // Raw object fetch: the whole jsonb value as text (discriminated as object).
     assert!(q.sql.contains("o.value::text AS v_0"), "sql:\n{}", q.sql);
     assert!(q.sql.contains("o.data_type = 'candles'"));
-    assert!(!q.sql.contains("core.data"), "must not touch core.data:\n{}", q.sql);
+    assert!(!q.sql.contains("FROM data c"), "must not touch data table:\n{}", q.sql);
     assert_eq!(q.indicators, vec!["value".to_string()]);
     // Same 8 positional binds as the scalar path.
     assert_eq!(q.binds.len(), 8);
@@ -49,7 +49,7 @@ fn object_field_projection_extracts_scalar() {
         "sql:\n{}",
         q.sql
     );
-    assert!(q.sql.contains("FROM core.obj o"));
+    assert!(q.sql.contains("FROM obj o"));
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn batch_mixes_bare_object_and_field_projections() {
 
 #[test]
 fn field_accessor_on_scalar_series_is_rejected() {
-    // `close` is a scalar (core.data) series here; `->close` is invalid on it.
+    // `close` is a scalar (`data`) series here; `->close` is invalid on it.
     let err = compile(&obj_req("[close.1d->close]")).unwrap_err();
     assert!(
         err.message.contains("requires an object series"),
@@ -97,8 +97,8 @@ fn mixing_object_and_scalar_series_is_rejected() {
 
 #[test]
 fn scalar_series_unaffected_when_obj_types_present() {
-    // `close` is not in obj_data_types → scalar path, reads core.data as before.
+    // `close` is not in obj_data_types → scalar path, reads `data` as before.
     let q = compile(&obj_req("[close.1d; $from:$to]")).unwrap();
-    assert!(q.sql.contains("FROM core.data c"), "sql:\n{}", q.sql);
-    assert!(!q.sql.contains("core.obj"));
+    assert!(q.sql.contains("FROM data c"), "sql:\n{}", q.sql);
+    assert!(!q.sql.contains("FROM obj o"));
 }
