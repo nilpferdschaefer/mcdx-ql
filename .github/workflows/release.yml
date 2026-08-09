@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
   pages: write
   id-token: write
 
@@ -29,11 +30,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up Java
+      - name: Set up Java (GitHub Packages settings.xml)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "11"
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+          settings-path: ${{ github.workspace }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -47,6 +52,8 @@ jobs:
 
       - name: Verify tag + build bundle
         id: bundle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -63,6 +70,7 @@ jobs:
           cargo test --features jni
           chmod +x scripts/*.sh
           ./scripts/package-bundle.sh
+          ./scripts/ci-publish-maven.sh
 
           mkdir -p _site/javadoc
           cp -a target/doc/. _site/

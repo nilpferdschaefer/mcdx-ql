@@ -228,7 +228,7 @@ This crate is **not** published to crates.io (GitHub Packages has no Cargo regis
 
 ### GitHub Packages (Maven — JAR + crate together)
 
-[Publish GitHub Packages](.github/workflows/publish-packages.yml) deploys one Maven package `com.nilpferdschaefer:mcdx-ql` containing:
+[CI](.github/workflows/ci.yml) (on `main`) and [Release](.github/workflows/release.yml) (on `v*.*.*` tags) deploy one Maven package `com.nilpferdschaefer:mcdx-ql` containing:
 
 | Artifact | Classifier | Contents |
 |----------|------------|----------|
