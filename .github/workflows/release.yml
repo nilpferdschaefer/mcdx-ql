@@ -7,8 +7,6 @@ on:
 permissions:
   contents: write
   packages: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -72,30 +70,6 @@ jobs:
           ./scripts/package-bundle.sh
           ./scripts/ci-publish-maven.sh
 
-          mkdir -p _site/javadoc
-          cp -a target/doc/. _site/
-          JAVADOC_HTML="java/target/reports/apidocs"
-          if [[ ! -f "${JAVADOC_HTML}/index.html" && -f java/target/apidocs/index.html ]]; then
-            JAVADOC_HTML="java/target/apidocs"
-          fi
-          cp -a "${JAVADOC_HTML}/." _site/javadoc/
-          cat > _site/index.html <<HTML
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <title>mcdx_ql docs</title>
-          </head>
-          <body>
-            <h1>mcdx-ql documentation</h1>
-            <ul>
-              <li><a href="mcdx_ql/index.html">Rust (rustdoc)</a></li>
-              <li><a href="javadoc/index.html">Java (Javadoc)</a></li>
-            </ul>
-          </body>
-          </html>
-          HTML
-
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -106,11 +80,6 @@ jobs:
             java/target/mcdx-ql-${{ steps.bundle.outputs.version }}-javadoc.jar
           if-no-files-found: error
           retention-days: 90
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -145,15 +114,3 @@ jobs:
             - `mcdx-ql-*.jar` — Java bindings alone
             - `mcdx-ql-*-javadoc.jar` — Javadoc JAR
             - Docs: https://nilpferdschaefer.github.io/mcdx-ql/ (rustdoc + `/javadoc/`)
-
-  deploy-docs:
-    name: deploy rustdoc to GitHub Pages
-    needs: release
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
