@@ -690,7 +690,20 @@ impl<'a> AnalyzeCtx<'a> {
                 self.walk_expr(&args[0])?;
                 self.walk_expr(&args[1])?;
             }
-            CallOp::Sqrt | CallOp::Abs => {
+            CallOp::Sqrt
+            | CallOp::Abs
+            | CallOp::Sin
+            | CallOp::Cos
+            | CallOp::Tan
+            | CallOp::Asin
+            | CallOp::Acos
+            | CallOp::Atan
+            | CallOp::Sinh
+            | CallOp::Cosh
+            | CallOp::Tanh
+            | CallOp::Asinh
+            | CallOp::Acosh
+            | CallOp::Atanh => {
                 if args.len() != 1 || window.is_some() {
                     return Err(Error::sem(
                         format!("{} expects one expression argument", op.as_str()),

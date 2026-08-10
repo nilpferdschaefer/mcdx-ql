@@ -283,6 +283,47 @@ fn worked_mapping_vol_96() {
 }
 
 #[test]
+fn tanh_lowers_to_sql_function() {
+    // tanh squashes any real into (-1, 1) — the bounded-signal use case.
+    let mut r = req("TANH(STD(RET([close.1d; $from:$to]), $period))");
+    r.params.insert("period".into(), ParamValue::Int(14));
+    let q = compile(&r).unwrap();
+    assert!(q.sql.contains("TANH("), "expected TANH( in SQL, got: {}", q.sql);
+}
+
+#[test]
+fn trig_and_hyperbolic_lower_to_sql() {
+    for (expr, needle) in [
+        ("SIN(AVG([close.1d; $from:$to], $period))", "SIN("),
+        ("COS(AVG([close.1d; $from:$to], $period))", "COS("),
+        ("TAN(AVG([close.1d; $from:$to], $period))", "TAN("),
+        ("ATAN(AVG([close.1d; $from:$to], $period))", "ATAN("),
+        ("SINH(AVG([close.1d; $from:$to], $period))", "SINH("),
+        ("ATANH(AVG([close.1d; $from:$to], $period))", "ATANH("),
+    ] {
+        let mut r = req(expr);
+        r.params.insert("period".into(), ParamValue::Int(14));
+        let q = compile(&r).unwrap();
+        assert!(
+            q.sql.contains(needle),
+            "expected {needle} in SQL for `{expr}`, got: {}",
+            q.sql
+        );
+    }
+}
+
+#[test]
+fn trig_functions_reject_a_window() {
+    // Scalar transforms take exactly one argument and no trailing window.
+    let mut r = req("TANH([close.1d; $from:$to], $period)");
+    r.params.insert("period".into(), ParamValue::Int(14));
+    assert!(
+        compile(&r).is_err(),
+        "TANH with a window must fail semantic analysis"
+    );
+}
+
+#[test]
 fn worked_mapping_sep_atr() {
     let mut r = req(
         "(AVG([close.1d; $from:$to], $fast) - AVG([close.1d; $from:$to], $slow)) / RMA(TR([close.1d; $from:$to]), $atr)",

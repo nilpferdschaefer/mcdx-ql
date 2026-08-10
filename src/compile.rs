@@ -542,6 +542,30 @@ impl Codegen<'_> {
                     series_key: a.series_key,
                 })
             }
+            // Unary trigonometric / hyperbolic transforms. SQL function name
+            // matches the builtin spelling (`op.as_str()`); each is a pure
+            // scalar map that inherits its argument's version / warmup / period.
+            CallOp::Sin
+            | CallOp::Cos
+            | CallOp::Tan
+            | CallOp::Asin
+            | CallOp::Acos
+            | CallOp::Atan
+            | CallOp::Sinh
+            | CallOp::Cosh
+            | CallOp::Tanh
+            | CallOp::Asinh
+            | CallOp::Acosh
+            | CallOp::Atanh => {
+                let a = self.gen_expr(&args[0])?;
+                Ok(Frag {
+                    value_sql: format!("{}({})", op.as_str(), a.value_sql),
+                    version_sql: a.version_sql,
+                    warmup_sql: a.warmup_sql,
+                    period: a.period,
+                    series_key: a.series_key,
+                })
+            }
             CallOp::Power => {
                 let a = self.gen_expr(&args[0])?;
                 let b = self.gen_expr(&args[1])?;
