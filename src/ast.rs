@@ -194,6 +194,21 @@ pub enum CallOp {
     Greatest,
     Power,
     Abs,
+    // Trigonometric (unary, radians).
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    // Hyperbolic (unary). `Tanh` squashes any real into (-1, 1) — used by
+    // bounded signal methodologies. Requires PostgreSQL 12+ on the SQL backend.
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
 }
 
 impl CallOp {
@@ -215,6 +230,18 @@ impl CallOp {
             "GREATEST" => Self::Greatest,
             "POWER" => Self::Power,
             "ABS" => Self::Abs,
+            "SIN" => Self::Sin,
+            "COS" => Self::Cos,
+            "TAN" => Self::Tan,
+            "ASIN" => Self::Asin,
+            "ACOS" => Self::Acos,
+            "ATAN" => Self::Atan,
+            "SINH" => Self::Sinh,
+            "COSH" => Self::Cosh,
+            "TANH" => Self::Tanh,
+            "ASINH" => Self::Asinh,
+            "ACOSH" => Self::Acosh,
+            "ATANH" => Self::Atanh,
             _ => return None,
         })
     }
@@ -235,6 +262,18 @@ impl CallOp {
             Self::Greatest => "GREATEST",
             Self::Power => "POWER",
             Self::Abs => "ABS",
+            Self::Sin => "SIN",
+            Self::Cos => "COS",
+            Self::Tan => "TAN",
+            Self::Asin => "ASIN",
+            Self::Acos => "ACOS",
+            Self::Atan => "ATAN",
+            Self::Sinh => "SINH",
+            Self::Cosh => "COSH",
+            Self::Tanh => "TANH",
+            Self::Asinh => "ASINH",
+            Self::Acosh => "ACOSH",
+            Self::Atanh => "ATANH",
         }
     }
 }

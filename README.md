@@ -147,6 +147,16 @@ All series in one expression must share the same source (or all be aggregated). 
 
 `AVG` `VAR` `STD` `COUNT` `RET` `TR` `EMA` `RMA` `RSI` `REGR` (alias `REGR_SLOPE`) `SQRT` `GREATEST` `POWER` `ABS`
 
+**Trigonometric / hyperbolic** (unary scalar — take one argument and no window):
+
+`SIN` `COS` `TAN` `ASIN` `ACOS` `ATAN` — trigonometric (radians)
+`SINH` `COSH` `TANH` `ASINH` `ACOSH` `ATANH` — hyperbolic
+
+Each lowers to the same-named Postgres function and inherits its argument's
+version / warmup / period. `TANH` maps any real into `(-1, 1)`, so a bounded
+signal squashes with e.g. `TANH((c - AVG(c, $n)) / STD(c, $n) / $kappa)`. The
+hyperbolic family requires **PostgreSQL 12+** on the SQL backend.
+
 **Regression (`REGR`)**
 
 `REGR(y, x, $period)` is the trailing `$period`-bar linear-regression slope of `y`
