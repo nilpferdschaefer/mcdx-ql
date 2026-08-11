@@ -147,6 +147,10 @@ All series in one expression must share the same source (or all be aggregated). 
 
 `AVG` `VAR` `STD` `COUNT` `RET` `TR` `EMA` `RMA` `RSI` `REGR` (alias `REGR_SLOPE`) `SQRT` `GREATEST` `POWER` `ABS`
 
+See **[docs/functions.md](docs/functions.md)** for the full reference — every
+operator's arity, windowing, and the SQL it lowers to (incl. `VAR`/`STD` being
+**population** statistics and the Wilder `EMA`/`RMA`/`RSI` semantics).
+
 **Trigonometric / hyperbolic** (unary scalar — take one argument and no window):
 
 `SIN` `COS` `TAN` `ASIN` `ACOS` `ATAN` — trigonometric (radians)
