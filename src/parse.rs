@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::ast::{
     AssetRef, BatchExpr, BinOp, CallOp, DomainBound, EmitCount, EmitEnd, Expr, IndexSelector,
-    LookbackBound, Series, SeriesDomain, TrailingPeriod, WindowSpec,
+    LookbackBound, ParamLit, Series, SeriesDomain, TrailingPeriod, WindowSpec,
 };
 use crate::interval::interval_ms;
 use crate::error::Error;
@@ -415,6 +415,14 @@ impl<'a> Parser<'a> {
         self.advance(); // .
         let bucket = self.parse_bucket(bucket_pos)?;
 
+        // Optional inline identity params selecting a stored variant:
+        // `[sma.1h{period:31}]` / `[sma.1h{period:31,foo:bar}]`.
+        let params = if matches!(self.peek().kind, TokenKind::LBrace) {
+            self.parse_series_params()?
+        } else {
+            Vec::new()
+        };
+
         // Optional object field accessor: `[candles.1h->close]`.
         let field = if matches!(self.peek().kind, TokenKind::Arrow) {
             self.advance(); // ->
@@ -494,11 +502,71 @@ impl<'a> Parser<'a> {
             source,
             name,
             bucket,
+            params,
             field,
             asset,
             domain,
             pos,
         }))
+    }
+
+    /// Parse `{ key : value (, key : value)* }` identity params after the bucket.
+    /// Keys are identifiers; values are integer or bare-identifier literals
+    /// (e.g. `{period:31}`). Empty `{}` is rejected — omit the braces instead.
+    fn parse_series_params(&mut self) -> Result<Vec<(String, ParamLit)>, Error> {
+        self.advance(); // {
+        let mut out: Vec<(String, ParamLit)> = Vec::new();
+        loop {
+            let key_tok = self.advance();
+            let key = match key_tok.kind {
+                TokenKind::Ident(s) => s,
+                _ => {
+                    return Err(self.err(
+                        "expected param name inside `{…}` — e.g. `[sma.1h{period:31}]`",
+                        Some(key_tok.pos),
+                    ))
+                }
+            };
+            if !matches!(self.peek().kind, TokenKind::Colon) {
+                return Err(self.err("expected `:` after param name", Some(self.peek().pos)));
+            }
+            self.advance(); // :
+            let val_tok = self.advance();
+            let value = match val_tok.kind {
+                TokenKind::Int(v) => ParamLit::Int(v),
+                TokenKind::Ident(s) => ParamLit::Str(s),
+                _ => {
+                    return Err(self.err(
+                        "expected an integer or identifier param value — e.g. `{period:31}`",
+                        Some(val_tok.pos),
+                    ))
+                }
+            };
+            if out.iter().any(|(k, _)| k == &key) {
+                return Err(self.err(format!("duplicate param key `{key}`"), Some(key_tok.pos)));
+            }
+            out.push((key, value));
+            match self.peek().kind {
+                TokenKind::Comma => {
+                    self.advance();
+                    continue;
+                }
+                TokenKind::RBrace => {
+                    self.advance();
+                    break;
+                }
+                _ => {
+                    return Err(self.err(
+                        "expected `,` or `}` in param list",
+                        Some(self.peek().pos),
+                    ))
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err(self.err("empty `{}` param list — omit the braces", None));
+        }
+        Ok(out)
     }
 
     /// Parse `1d` / `15m` / `1h` / `1w` after a `.`.
@@ -986,6 +1054,58 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_inline_params() {
+        let e = parse_expr("[sma.1h{period:31}]").unwrap();
+        match e {
+            Expr::Series(s) => {
+                assert_eq!(s.name, "sma");
+                assert_eq!(s.bucket, "1h");
+                assert_eq!(s.params, vec![("period".to_string(), ParamLit::Int(31))]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_inline_params_with_asset_and_domain() {
+        // params sit between the bucket and `@asset` / `;domain`.
+        let e = parse_expr("[sma.1h{period:7}@self; $from:$to]").unwrap();
+        match e {
+            Expr::Series(s) => {
+                assert_eq!(s.params, vec![("period".to_string(), ParamLit::Int(7))]);
+                assert_eq!(s.asset, AssetRef::SelfRow);
+                assert!(matches!(s.domain, Some(SeriesDomain::Absolute { .. })));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_multi_key_params() {
+        let e = parse_expr("[vol.1h{period:96,source:binance}]").unwrap();
+        match e {
+            Expr::Series(s) => {
+                assert_eq!(
+                    s.params,
+                    vec![
+                        ("period".to_string(), ParamLit::Int(96)),
+                        ("source".to_string(), ParamLit::Str("binance".to_string())),
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_malformed_params() {
+        assert!(parse_expr("[sma.1h{}]").is_err());
+        assert!(parse_expr("[sma.1h{period}]").is_err());
+        assert!(parse_expr("[sma.1h{period:}]").is_err());
+        assert!(parse_expr("[sma.1h{period:31,period:7}]").is_err());
     }
 
     #[test]

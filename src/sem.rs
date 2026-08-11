@@ -109,6 +109,8 @@ pub fn analyze_obj(
         reporting_period: None,
         source: None,
         saw_source: false,
+        identity_hash: None,
+        identity_desc: String::new(),
         saw_series: false,
         max_lookback: 0,
         needs_bar_ret: false,
@@ -224,7 +226,10 @@ pub fn analyze_obj(
     }
 
     let source = ctx.source;
-    let params_hash = crate::params_hash_for_source(source.as_deref());
+    let params_hash = ctx
+        .identity_hash
+        .clone()
+        .unwrap_or_else(|| crate::EMPTY_PARAMS_HASH.to_string());
 
     Ok(Analysis {
         domain,
@@ -240,6 +245,32 @@ pub fn analyze_obj(
         required_params: ctx.required_params,
         series_names: ctx.series_names,
     })
+}
+
+/// Render a series identity for mismatch errors, e.g. `[binance:…{period:31}]`
+/// or `[…]` (aggregated, no params).
+fn describe_identity(source: Option<&str>, params: &[(String, serde_json::Value)]) -> String {
+    let mut inner = String::new();
+    match source {
+        Some(s) => {
+            inner.push_str(s);
+            inner.push_str(":…");
+        }
+        None => inner.push('…'),
+    }
+    if !params.is_empty() {
+        inner.push('{');
+        for (i, (k, v)) in params.iter().enumerate() {
+            if i > 0 {
+                inner.push(',');
+            }
+            inner.push_str(k);
+            inner.push(':');
+            inner.push_str(&v.to_string());
+        }
+        inner.push('}');
+    }
+    format!("[{inner}]")
 }
 
 struct AnalyzeCtx<'a> {
@@ -258,6 +289,13 @@ struct AnalyzeCtx<'a> {
     source: Option<String>,
     /// Whether at least one series has set [`Self::source`].
     saw_source: bool,
+    /// Combined `(source + inline params)` identity hash, unified across the
+    /// query. All series must resolve to the same identity (mixing stored
+    /// variants in one query is not yet supported); this drives the scan's
+    /// `params_hash` filter. `None` until the first series is seen.
+    identity_hash: Option<String>,
+    /// Human-readable identity of the first series, for mismatch errors.
+    identity_desc: String,
     saw_series: bool,
     max_lookback: i32,
     needs_bar_ret: bool,
@@ -412,6 +450,37 @@ impl<'a> AnalyzeCtx<'a> {
                 self.expr_src,
                 Some(s.pos),
             ));
+        }
+
+        // Identity = source + inline params, hashed to match the stored
+        // `params_hash`. All series in one query must resolve to the same
+        // identity; mixing stored variants (e.g. `{period:31}` vs `{period:7}`)
+        // in a single query is not yet supported.
+        let params_json: Vec<(String, serde_json::Value)> = s
+            .params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_json()))
+            .collect();
+        let ident = crate::params_hash_for_identity(s.source.as_deref(), &params_json);
+        let ident_desc = describe_identity(s.source.as_deref(), &params_json);
+        match &self.identity_hash {
+            None => {
+                self.identity_hash = Some(ident);
+                self.identity_desc = ident_desc;
+            }
+            Some(existing) if existing == &ident => {}
+            Some(_) => {
+                return Err(Error::sem(
+                    format!(
+                        "all series in one query must share the same identity; got {} vs {} — \
+                         query differing stored variants as separate requests (mixing them in one \
+                         query is not yet supported)",
+                        self.identity_desc, ident_desc
+                    ),
+                    self.expr_src,
+                    Some(s.pos),
+                ));
+            }
         }
 
         match &self.reporting_period {
