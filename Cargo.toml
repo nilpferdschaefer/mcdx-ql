@@ -1,6 +1,6 @@
 [package]
 name = "mcdx_ql"
-version = "0.2.3"
+version = "0.3.2"
 edition = "2021"
 description = "Compile indicator expression grammar to joint analytics SQL"
 license = "MIT"
