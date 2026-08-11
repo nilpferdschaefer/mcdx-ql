@@ -3,6 +3,9 @@
 use std::collections::BTreeMap;
 
 /// Top-level request body: a single expression or a named batch.
+// Constructed once per query (not in hot paths or large collections), so the
+// inline `Expr` size is immaterial; boxing would ripple through the parser/compiler.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum BatchExpr {
     Single(Expr),
@@ -82,6 +85,24 @@ pub enum TrailingPeriod {
     Int { value: i64, pos: usize },
 }
 
+/// One inline series-identity param value: `[sma.1h{period:31}]` → `("period", Int(31))`.
+/// Maps to a `serde_json` scalar for `params_hash` (integers stay integers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamLit {
+    Int(i64),
+    Str(String),
+}
+
+impl ParamLit {
+    /// Convert to the `serde_json::Value` used to build the canonical `params_hash`.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            ParamLit::Int(v) => serde_json::Value::Number((*v).into()),
+            ParamLit::Str(s) => serde_json::Value::String(s.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Series {
     /// Optional exchange/source qualifier for unaggregated bars:
@@ -91,6 +112,10 @@ pub struct Series {
     pub name: String,
     /// Bar bucket / reporting period suffix, e.g. `1d`, `1h`, `5m`.
     pub bucket: String,
+    /// Inline identity params selecting one stored variant of a parameterized
+    /// scalar: `[sma.1h{period:31}]`. Empty for canonical/aggregated series.
+    /// Keys are canonicalized (sorted) when hashing, so order here is irrelevant.
+    pub params: Vec<(String, ParamLit)>,
     /// Object field accessor for `obj` series: `[candles.1h->close]` →
     /// `field = Some("close")`, projecting one JSON key as a scalar. `None` on a
     /// scalar `data` series, or on a bare object fetch `[candles.1h]`.

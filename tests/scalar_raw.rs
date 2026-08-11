@@ -126,3 +126,53 @@ fn two_different_stored_scalar_stems_rejected() {
         err.message
     );
 }
+
+// SHA-256 of the canonical compact JSON — must match what the analytics loader
+// wrote for the stored variant (mcdx-datastore stream_params.rs).
+const HASH_PERIOD_31: &str = "c5269d3c45d8d87c159d3f57ff76b94ca5c53bfc4387b31e8ed680fd2f829e38";
+const HASH_EMPTY: &str = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+
+#[test]
+fn inline_params_drive_the_scan_hash() {
+    let q = compile(&raw_req("[sma.1h{period:31}; $from:$to]")).unwrap();
+    // Both the bounds scan and the src scan must filter the period-31 identity.
+    assert!(
+        q.sql
+            .contains(&format!("c.params_hash = '{HASH_PERIOD_31}'")),
+        "sql should filter the period:31 hash:\n{}",
+        q.sql
+    );
+    assert!(
+        !q.sql.contains(HASH_EMPTY),
+        "must not fall back to the empty-params hash:\n{}",
+        q.sql
+    );
+    assert_eq!(q.params_hash, HASH_PERIOD_31);
+    assert!(q.sql.contains("c.data_type = 'sma'"), "sql:\n{}", q.sql);
+}
+
+#[test]
+fn bare_stored_scalar_uses_empty_hash() {
+    let q = compile(&raw_req("[sma.1h; $from:$to]")).unwrap();
+    assert_eq!(q.params_hash, HASH_EMPTY);
+    assert!(
+        q.sql.contains(&format!("c.params_hash = '{HASH_EMPTY}'")),
+        "sql:\n{}",
+        q.sql
+    );
+}
+
+#[test]
+fn mixing_stored_variants_in_one_query_is_rejected() {
+    // period:31 vs period:7 resolve to different identities — not yet supported
+    // in a single query (Phase 2). Must be a clear error, not a silent wrong scan.
+    let err = compile(&raw_req(
+        "{ s31: [sma.1h{period:31}; $from:$to], s7: [sma.1h{period:7}; $from:$to] }",
+    ))
+    .unwrap_err();
+    assert!(
+        err.message.contains("share the same identity"),
+        "got: {}",
+        err.message
+    );
+}
