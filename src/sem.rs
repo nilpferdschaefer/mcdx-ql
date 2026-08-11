@@ -90,7 +90,7 @@ pub fn analyze(
     params: &BTreeMap<String, ParamValue>,
     expr_src: &str,
 ) -> Result<Analysis, Error> {
-    analyze_obj(batch, params, expr_src, &BTreeSet::new())
+    analyze_obj(batch, params, expr_src, &BTreeSet::new(), &BTreeSet::new())
 }
 
 pub fn analyze_obj(
@@ -98,11 +98,13 @@ pub fn analyze_obj(
     params: &BTreeMap<String, ParamValue>,
     expr_src: &str,
     obj_data_types: &BTreeSet<String>,
+    scalar_data_types: &BTreeSet<String>,
 ) -> Result<Analysis, Error> {
     let mut ctx = AnalyzeCtx {
         params,
         expr_src,
         obj_data_types,
+        scalar_data_types,
         domain: None,
         reporting_period: None,
         source: None,
@@ -245,6 +247,11 @@ struct AnalyzeCtx<'a> {
     expr_src: &'a str,
     /// Series stems stored in `obj` (accepted without the scalar allowlist).
     obj_data_types: &'a BTreeSet<String>,
+    /// Series stems stored in the scalar `data` fact table (`kind='data'` in
+    /// `series_slot`), resolved by the caller. Accepted without the hardcoded
+    /// scalar allowlist, exactly like [`Self::obj_data_types`]. May overlap with
+    /// it (per-identity exclusivity); the compiler resolves the split.
+    scalar_data_types: &'a BTreeSet<String>,
     domain: Option<Domain>,
     reporting_period: Option<String>,
     /// Unified source once any series has been seen (`None` = aggregated).
@@ -346,9 +353,12 @@ impl<'a> AnalyzeCtx<'a> {
     }
 
     fn walk_series(&mut self, s: &Series) -> Result<(), Error> {
-        // Object (`obj`) series bypass the scalar allowlist; they compile to a
-        // raw object fetch or a `->field` scalar projection in the obj envelope.
-        if !self.obj_data_types.contains(&s.name) {
+        // Object (`obj`) series and caller-resolved stored scalar (`data`)
+        // series bypass the hardcoded scalar allowlist; they compile to a raw
+        // fetch (obj envelope or the `data` raw envelope respectively). Only
+        // series present in neither set fall back to the built-in allowlist,
+        // which still gates typos and reserved/unsupported names.
+        if !self.obj_data_types.contains(&s.name) && !self.scalar_data_types.contains(&s.name) {
         match s.name.as_str() {
             "close" => {}
             "high" | "low" => {

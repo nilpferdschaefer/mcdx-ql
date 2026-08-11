@@ -25,6 +25,7 @@ fn obj_req(expr: &str) -> CompileRequest {
         limit: 16,
         publish_from: None,
         obj_data_types: BTreeSet::from(["candles".to_string()]),
+        scalar_data_types: BTreeSet::new(),
     }
 }
 

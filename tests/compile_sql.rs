@@ -26,6 +26,7 @@ fn req(expr: &str) -> CompileRequest {
         limit: 16,
         publish_from: None,
         obj_data_types: Default::default(),
+        scalar_data_types: Default::default(),
     }
 }
 

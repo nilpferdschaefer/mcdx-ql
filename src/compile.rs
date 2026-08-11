@@ -32,6 +32,19 @@ pub struct CompileRequest {
     /// scalar `->field` projection) instead of the default scalar `data`
     /// path. Empty = every series is scalar (backwards-compatible default).
     pub obj_data_types: std::collections::BTreeSet<String>,
+    /// Series stems stored in the scalar `data` fact table (`kind='data'` in
+    /// `series_slot`), resolved by the caller and scoped to the requested
+    /// assets. A referenced stem in this set — other than `close`, which keeps
+    /// the computed analytics engine — compiles to a raw `data` fetch, the
+    /// scalar mirror of the `obj` raw-fetch path. Empty = only `close` is a
+    /// valid scalar series (backwards-compatible default).
+    ///
+    /// A data_type may appear in BOTH this set and `obj_data_types`:
+    /// `series_slot` exclusivity is per-identity, not per-data_type, so the same
+    /// stem can be `data` for one identity and `obj` for another. Compilation
+    /// rejects a referenced stem present in both, since one query targets one
+    /// fact table.
+    pub scalar_data_types: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,7 +103,13 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         return Err(Error::compile("limit must be >= 1", &req.expr));
     }
 
-    let analysis = analyze_obj(batch, &req.params, &req.expr, &req.obj_data_types)?;
+    let analysis = analyze_obj(
+        batch,
+        &req.params,
+        &req.expr,
+        &req.obj_data_types,
+        &req.scalar_data_types,
+    )?;
 
     if let Some(req_period) = &req.reporting_period {
         if req_period != &analysis.reporting_period {
@@ -109,6 +128,26 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         Error::compile(format!("{e}"), &req.expr)
     })?;
 
+    // `series_slot` exclusivity is per-identity, not per-data_type, so the same
+    // stem can be stored as `data` for one identity and `obj` for another. The
+    // caller resolves both sets scoped to the requested assets; a referenced
+    // stem in BOTH means a genuine data/obj split across those assets, which a
+    // single-table query cannot serve. Fail clearly instead of silently reading
+    // one table.
+    if let Some(name) = analysis
+        .series_names
+        .iter()
+        .find(|n| req.obj_data_types.contains(*n) && req.scalar_data_types.contains(*n))
+    {
+        return Err(Error::compile(
+            format!(
+                "series [{name}] is stored as both `data` and `obj` across the requested \
+                 assets; query a single storage kind at a time"
+            ),
+            &req.expr,
+        ));
+    }
+
     // Object (`obj`) series path. A referenced stem is an object series when
     // the caller resolved it as `obj` in `series_slot`. When every series
     // is an object series, compile the raw-fetch / `->field` envelope against
@@ -126,6 +165,25 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
             ));
         }
         return compile_obj_batch(req, batch, analysis, reporting_period, interval);
+    }
+
+    // Raw stored-scalar path: stems stored in `data` (other than `close`, which
+    // keeps the computed analytics engine) compile to a raw `data` fetch — the
+    // scalar mirror of the `obj` path. Bare fetch only; operators are rejected.
+    let raw_stem_count = analysis
+        .series_names
+        .iter()
+        .filter(|n| n.as_str() != "close" && req.scalar_data_types.contains(*n))
+        .count();
+    if raw_stem_count > 0 {
+        if raw_stem_count != analysis.series_names.len() {
+            return Err(Error::compile(
+                "cannot mix raw stored-scalar series with computed series \
+                 (e.g. `close` or operators) in one query",
+                &req.expr,
+            ));
+        }
+        return compile_scalar_raw_batch(req, batch, analysis, reporting_period, interval);
     }
 
     // `->field` projects a JSON key and is only valid on an object series.
@@ -1359,6 +1417,239 @@ fn render_obj_envelope(
          \x20 WHERE o.data_type = '{stem_esc}' AND o.reporting_period = '{reporting_period}'\n\
          \x20   AND o.params_hash = '{params_hash}' AND a.canonical_ticker = ANY(p.coins)\n\
          \x20   AND o.timestamp_start >= b.emit_from AND o.timestamp_start <= b.emit_to\n\
+         ),\n"
+    )
+    .unwrap();
+
+    write!(
+        sql,
+        "unpivoted AS (\n\
+         \x20 SELECT s.coin, u.indicator, s.timestamp_start, s.timestamp_end, u.value, s.version, TRUE AS warmup_complete\n\
+         \x20 FROM src s CROSS JOIN params p\n\
+         \x20 CROSS JOIN LATERAL (VALUES"
+    )
+    .unwrap();
+    for (i, (name, _val)) in cols.iter().enumerate() {
+        let comma = if i + 1 == cols.len() { "" } else { "," };
+        let esc = name.replace('\'', "''");
+        write!(sql, "\n    ('{esc}', v_{i}){comma}").unwrap();
+    }
+    write!(
+        sql,
+        "\n  ) AS u(indicator, value)\n\
+         \x20 WHERE u.value IS NOT NULL\n\
+         \x20   AND s.timestamp_start >= COALESCE(NULLIF(p.publish_from, -9223372036854775808), -9223372036854775808)\n\
+         \x20   AND s.timestamp_start > COALESCE(p.after_ts, -9223372036854775808)\n\
+         \x20   AND u.indicator = ANY(p.indicators)\n\
+         ),\n"
+    )
+    .unwrap();
+
+    write!(
+        sql,
+        "ranked AS (\n\
+         \x20 SELECT u.*, DENSE_RANK() OVER (ORDER BY u.timestamp_start) AS ts_rank FROM unpivoted u\n\
+         )\n\
+         SELECT r.coin, r.indicator, r.timestamp_start, r.timestamp_end, r.value, r.version, r.warmup_complete\n\
+         FROM ranked r CROSS JOIN params p\n\
+         WHERE r.ts_rank <= p.lim\n\
+         ORDER BY r.timestamp_start, r.coin, r.indicator;"
+    )
+    .unwrap();
+
+    sql
+}
+
+/// Compile a bare stored-scalar series fetch against the `data` fact table.
+///
+/// The scalar mirror of [`compile_obj_batch`]: bare series only (operators
+/// rejected), all members share one stem, and the output columns / 8 positional
+/// binds match the scalar and obj envelopes. `close` never reaches here — it
+/// keeps the computed analytics engine. Rows match on `params_hash` like every
+/// QL query, so a stored indicator with component params (e.g. `sma` window=14)
+/// is targeted by passing those params.
+fn compile_scalar_raw_batch(
+    req: &CompileRequest,
+    batch: &BatchExpr,
+    analysis: Analysis,
+    reporting_period: String,
+    interval_ms: i64,
+) -> Result<CompiledQuery, Error> {
+    let indicators: Vec<String> = match batch {
+        BatchExpr::Single(_) => vec!["value".to_string()],
+        BatchExpr::Batch(m) => m.keys().cloned().collect(),
+    };
+
+    let members: Vec<(String, &Expr)> = match batch {
+        BatchExpr::Single(e) => vec![("value".to_string(), e)],
+        BatchExpr::Batch(m) => m.iter().map(|(k, v)| (k.clone(), v)).collect(),
+    };
+
+    let mut cols: Vec<(String, String)> = Vec::new(); // (indicator, value_text_sql)
+    let mut stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (name, e) in &members {
+        match e {
+            Expr::Series(s) => {
+                if let Some(f) = &s.field {
+                    return Err(Error::compile(
+                        format!(
+                            "`->{f}` field accessor requires an object series; `{}` is a scalar series",
+                            s.name
+                        ),
+                        &req.expr,
+                    ));
+                }
+                if s.name.as_str() == "close" || !req.scalar_data_types.contains(&s.name) {
+                    return Err(Error::compile(
+                        format!("`{}` is not a raw stored-scalar series", s.name),
+                        &req.expr,
+                    ));
+                }
+                stems.insert(s.name.clone());
+                cols.push((name.clone(), "c.value::text".to_string()));
+            }
+            _ => {
+                return Err(Error::compile(
+                    "a stored scalar series cannot be wrapped in an operator yet; \
+                     fetch the raw series and compute downstream",
+                    &req.expr,
+                ))
+            }
+        }
+    }
+    if stems.len() != 1 {
+        return Err(Error::compile(
+            "all stored scalar series in one query must share the same stem",
+            &req.expr,
+        ));
+    }
+    let stem = stems.iter().next().unwrap();
+
+    let sql = render_data_raw_envelope(
+        &reporting_period,
+        &analysis.params_hash,
+        interval_ms,
+        &analysis.domain,
+        &cols,
+        stem,
+    );
+
+    let (dirty_from, dirty_to) = match &analysis.domain {
+        Domain::Absolute { from_ms, to_ms, .. } => {
+            (BindValue::BigInt(*from_ms), BindValue::BigInt(*to_ms))
+        }
+        _ => (BindValue::Null, BindValue::Null),
+    };
+    let binds = vec![
+        BindValue::TextArray(req.assets.clone()),
+        dirty_from,
+        dirty_to,
+        BindValue::BigInt(req.after_ts),
+        BindValue::Int(req.limit),
+        BindValue::BigInt(req.publish_from.unwrap_or(i64::MIN)),
+        BindValue::Int(analysis.max_lookback),
+        BindValue::TextArray(indicators.clone()),
+    ];
+
+    Ok(CompiledQuery {
+        sql,
+        binds,
+        reporting_period,
+        source: analysis.source.clone(),
+        params_hash: analysis.params_hash.clone(),
+        expr: req.expr.clone(),
+        domain: analysis.domain.clone(),
+        indicators,
+        max_lookback: analysis.max_lookback,
+        scaffolds: Scaffolds::default(),
+        interval_ms,
+        analysis,
+    })
+}
+
+/// Render the raw `data` fetch envelope — the scalar mirror of
+/// [`render_obj_envelope`] (identical output columns + 8 positional binds).
+/// Values come straight from stored `data.value`; there is no computation, so
+/// `warmup_complete` is `TRUE` by construction. `cols` are
+/// `(indicator_name, value_text_sql)`.
+fn render_data_raw_envelope(
+    reporting_period: &str,
+    params_hash: &str,
+    interval_ms: i64,
+    domain: &Domain,
+    cols: &[(String, String)],
+    stem: &str,
+) -> String {
+    use std::fmt::Write;
+    let stem_esc = stem.replace('\'', "''");
+    let mut sql = String::new();
+
+    write!(
+        sql,
+        "WITH params AS (\n\
+         \x20 SELECT ?::text[] AS coins, ?::bigint AS dirty_from, ?::bigint AS dirty_to,\n\
+         \x20        ?::bigint AS after_ts, ?::int AS lim, ?::bigint AS publish_from,\n\
+         \x20        ?::int AS max_lookback, ?::text[] AS indicators\n\
+         ),\n"
+    )
+    .unwrap();
+
+    let scan = format!(
+        "CROSS JOIN LATERAL (\n\
+         \x20   SELECT MIN(c.timestamp_start) AS min_ts, MAX(c.timestamp_start) AS max_ts\n\
+         \x20   FROM data c JOIN mcdx_asset a ON a.id = c.asset\n\
+         \x20   WHERE c.data_type = '{stem_esc}' AND c.reporting_period = '{reporting_period}'\n\
+         \x20     AND c.params_hash = '{params_hash}' AND a.canonical_ticker = ANY(p.coins)\n\
+         \x20 ) l"
+    );
+    match domain {
+        Domain::Absolute { .. } => writeln!(
+            sql,
+            "bounds AS (SELECT p.dirty_from AS emit_from, p.dirty_to AS emit_to FROM params p),"
+        )
+        .unwrap(),
+        Domain::Full => writeln!(
+            sql,
+            "bounds AS (SELECT l.min_ts AS emit_from, l.max_ts AS emit_to FROM params p {scan}),"
+        )
+        .unwrap(),
+        Domain::TrailingLatest { bars, end_offset } => {
+            let end_shift = *end_offset as i64 * interval_ms;
+            if *bars == i32::MAX {
+                writeln!(sql, "bounds AS (SELECT l.min_ts AS emit_from, l.max_ts - {end_shift} AS emit_to FROM params p {scan}),").unwrap();
+            } else {
+                let span = (*bars as i64 - 1) * interval_ms;
+                writeln!(sql, "bounds AS (SELECT (l.max_ts - {end_shift}) - {span} AS emit_from, l.max_ts - {end_shift} AS emit_to FROM params p {scan}),").unwrap();
+            }
+        }
+        Domain::FromStart { start, count } => {
+            let start_shift = format!("l.min_ts + (({start} - 1)::bigint * {interval_ms})");
+            if *count == i32::MAX {
+                writeln!(sql, "bounds AS (SELECT {start_shift} AS emit_from, l.max_ts AS emit_to FROM params p {scan}),").unwrap();
+            } else {
+                let span = (*count as i64 - 1) * interval_ms;
+                writeln!(sql, "bounds AS (SELECT {start_shift} AS emit_from, LEAST(l.max_ts, ({start_shift}) + {span}) AS emit_to FROM params p {scan}),").unwrap();
+            }
+        }
+    }
+
+    write!(
+        sql,
+        "src AS (\n\
+         \x20 SELECT a.canonical_ticker AS coin, c.timestamp_start,\n\
+         \x20        c.timestamp_start + {interval_ms} AS timestamp_end, c.version"
+    )
+    .unwrap();
+    for (i, (_name, val)) in cols.iter().enumerate() {
+        write!(sql, ",\n         {val} AS v_{i}").unwrap();
+    }
+    write!(
+        sql,
+        "\n  FROM data c JOIN mcdx_asset a ON a.id = c.asset\n\
+         \x20 CROSS JOIN params p CROSS JOIN bounds b\n\
+         \x20 WHERE c.data_type = '{stem_esc}' AND c.reporting_period = '{reporting_period}'\n\
+         \x20   AND c.params_hash = '{params_hash}' AND a.canonical_ticker = ANY(p.coins)\n\
+         \x20   AND c.timestamp_start >= b.emit_from AND c.timestamp_start <= b.emit_to\n\
          ),\n"
     )
     .unwrap();

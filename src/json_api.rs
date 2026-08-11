@@ -27,6 +27,12 @@ pub struct CompileRequestJson {
     /// caller resolves these from `series_slot`. Empty = all scalar.
     #[serde(default)]
     pub obj_data_types: Vec<String>,
+    /// Series stems stored in the scalar `data` fact table (`kind='data'`),
+    /// resolved from `series_slot` scoped to the requested assets. Optional; a
+    /// stem here (other than `close`) compiles to a raw `data` fetch. Empty =
+    /// only `close` is a valid scalar series.
+    #[serde(default)]
+    pub scalar_data_types: Vec<String>,
 }
 
 fn default_after_ts() -> i64 {
@@ -232,6 +238,7 @@ impl CompileRequestJson {
             limit: self.limit,
             publish_from: self.publish_from,
             obj_data_types: self.obj_data_types.into_iter().collect(),
+            scalar_data_types: self.scalar_data_types.into_iter().collect(),
         }
     }
 }
