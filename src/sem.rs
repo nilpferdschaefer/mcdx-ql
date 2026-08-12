@@ -79,6 +79,10 @@ pub struct Analysis {
     pub needs_closes_to_date: bool,
     pub needs_highs_to_date: bool,
     pub needs_lows_to_date: bool,
+    /// The query references a candle identity (`[candle.iv]`, only valid as the
+    /// argument to `TR(...)`), so the base scan must source raw high/low from the
+    /// `data_type='candle'` OHLC rows.
+    pub needs_ohlc: bool,
     /// Qualified market tickers referenced via `@` (resolved literals).
     pub market_tickers: BTreeSet<String>,
     pub required_params: BTreeSet<String>,
@@ -117,6 +121,8 @@ pub fn analyze_obj(
         needs_closes_to_date: false,
         needs_highs_to_date: false,
         needs_lows_to_date: false,
+        needs_ohlc: false,
+        tr_candle_ok: false,
         market_tickers: BTreeSet::new(),
         required_params: BTreeSet::new(),
         series_names: BTreeSet::new(),
@@ -241,6 +247,7 @@ pub fn analyze_obj(
         needs_closes_to_date: ctx.needs_closes_to_date,
         needs_highs_to_date: ctx.needs_highs_to_date,
         needs_lows_to_date: ctx.needs_lows_to_date,
+        needs_ohlc: ctx.needs_ohlc,
         market_tickers: ctx.market_tickers,
         required_params: ctx.required_params,
         series_names: ctx.series_names,
@@ -302,6 +309,10 @@ struct AnalyzeCtx<'a> {
     needs_closes_to_date: bool,
     needs_highs_to_date: bool,
     needs_lows_to_date: bool,
+    needs_ohlc: bool,
+    /// True only while walking the direct series argument of `TR(...)`, so the
+    /// `candle` identity is accepted there and rejected everywhere else.
+    tr_candle_ok: bool,
     market_tickers: BTreeSet<String>,
     required_params: BTreeSet<String>,
     series_names: BTreeSet<String>,
@@ -399,6 +410,21 @@ impl<'a> AnalyzeCtx<'a> {
         if !self.obj_data_types.contains(&s.name) && !self.scalar_data_types.contains(&s.name) {
         match s.name.as_str() {
             "close" => {}
+            "candle" => {
+                // The OHLC candle identity is only meaningful as the direct
+                // argument to `TR(...)` (HLC true range). Reject it anywhere
+                // else — it has no scalar value of its own.
+                if !self.tr_candle_ok {
+                    return Err(Error::sem(
+                        "series [candle] is only valid as the argument to TR(...), e.g. \
+                         TR([candle.1d])",
+                        self.expr_src,
+                        Some(s.pos),
+                    ));
+                }
+                // Base scan must source raw high/low from the candle OHLC rows.
+                self.needs_ohlc = true;
+            }
             "high" | "low" => {
                 // Scaffold hooks exist for ADX; full multi-type ordered scan is not yet emitted.
                 return Err(Error::sem(
@@ -691,15 +717,30 @@ impl<'a> AnalyzeCtx<'a> {
                 self.walk_expr(&args[0])?;
             }
             CallOp::Tr => {
-                self.needs_closes_to_date = true;
                 if args.len() != 1 {
                     return Err(Error::sem("TR expects one series argument", self.expr_src, Some(pos)));
                 }
                 if window.is_some() {
                     return Err(Error::sem("TR does not take a lookback window", self.expr_src, Some(pos)));
                 }
+                // TR is HLC true range and requires a candle/OHLC identity.
+                // `TR([close…])` (a bare close/scalar series) is a type error.
+                match &args[0] {
+                    Expr::Series(s) if s.name == "candle" => {}
+                    _ => {
+                        return Err(Error::sem(
+                            "TR() requires a candle identity, e.g. TR([candle.1d]); \
+                             TR([close…]) is no longer supported (TR is HLC true range)",
+                            self.expr_src,
+                            Some(pos),
+                        ));
+                    }
+                }
                 self.max_lookback = self.max_lookback.max(1);
-                self.walk_expr(&args[0])?;
+                self.tr_candle_ok = true;
+                let r = self.walk_expr(&args[0]);
+                self.tr_candle_ok = false;
+                r?;
             }
             CallOp::Avg | CallOp::Var | CallOp::Std | CallOp::Count => {
                 if args.len() != 1 {
@@ -723,7 +764,11 @@ impl<'a> AnalyzeCtx<'a> {
                 self.walk_expr(&args[0])?;
             }
             CallOp::Rma => {
+                // ATR path: Wilder RMA of the HLC true range needs high/low/close
+                // to-date arrays (RMA is only supported as RMA(TR([close]))).
                 self.needs_closes_to_date = true;
+                self.needs_highs_to_date = true;
+                self.needs_lows_to_date = true;
                 if args.len() != 1 {
                     return Err(Error::sem("RMA expects one argument plus period", self.expr_src, Some(pos)));
                 }

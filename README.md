@@ -203,7 +203,7 @@ Version is `MAX(version)` over the same frame as the primary window (or `GREATES
 | `sma_14` | `AVG([close.1d; $from:$to], $period)` |
 | `vol_96` | `STD(RET([close.1d; $from:$to]), $period) * SQRT($bars_per_year)` |
 | `ema_48` | `EMA([close.1d; $from:$to], $period)` |
-| `atr_14` | `RMA(TR([close.1d; $from:$to]), $period)` |
+| `atr_14` | `RMA(TR([candle.1d; $from:$to]), $period)` |
 | `rsi_14` | `RSI([close.1d; $from:$to], $period)` |
 | `sep_atr` | `(AVG(…, $fast) - AVG(…, $slow)) / RMA(TR(…), $atr)` |
 | `beta_31` | `REGR(RET([close.1d@self; …]), RET([close.1d@$benchmark; …]), $period)` |

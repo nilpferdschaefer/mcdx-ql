@@ -17,6 +17,7 @@
 mod ast;
 mod compile;
 mod error;
+pub mod indicators;
 mod interval;
 mod json_api;
 mod lex;
@@ -37,6 +38,11 @@ pub use compile::{
     compile, compile_batch, compile_expr, BindValue, CompiledQuery, CompileRequest, Scaffolds,
 };
 pub use error::{Error, ErrorCode};
+pub use indicators::{
+    ema_series, regr_slope, ret_series, rolling_avg, rolling_count, rolling_regr_slope,
+    rolling_std, rolling_stat, rolling_var, rsi_from_avgs, tr_series, wilder_atr, wilder_rsi,
+    IndicatorError, SeriesOut,
+};
 pub use interval::{interval_ms, IntervalError};
 pub use json_api::{
     compile_json, BindValueJson, CompileRequestJson, CompileResponseJson, CompiledQueryJson,
@@ -47,7 +53,7 @@ pub use parse::{parse_batch, parse_expr};
 pub use result_map::{
     map_sql_row, sql_columns, IndicatorComputeRow, MapRowError, SqlValue,
 };
-pub use sem::{analyze, Analysis, Domain, ParamValue};
+pub use sem::{analyze, analyze_obj, Analysis, Domain, ParamValue};
 
 /// Fingerprint used for bare / aggregated bars (`params_hash` of empty params).
 /// SHA-256 of the JSON object `{}` — matches analytics empty-params convention.
