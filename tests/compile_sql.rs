@@ -243,8 +243,50 @@ fn compiles_ema_close_sql_shape() {
 
 #[test]
 fn compiles_atr_wilder_seed_bars() {
-    let q = compile(&req("RMA(TR([close.1d; $from:$to]), $period)")).unwrap();
+    let q = compile(&req("RMA(TR([candle.1d; $from:$to]), $period)")).unwrap();
     assert!(q.sql.contains("WHERE t.ord BETWEEN 2 AND 15"));
+    // ATR is now HLC: the base scan sources high/low from the candle OHLC rows,
+    // and the array recursion uses the HLC true range.
+    assert!(q.scaffolds.ohlc);
+    assert!(q.sql.contains("cd.data_type = 'candle'"));
+    assert!(q
+        .sql
+        .contains("GREATEST(v.high - v.low, ABS(v.high - p.close), ABS(v.low - p.close))"));
+}
+
+#[test]
+fn standalone_tr_on_candle_is_hlc_true_range() {
+    let q = compile(&req("TR([candle.1d; $from:$to])")).unwrap();
+    assert!(q.scaffolds.ohlc);
+    // HLC true range from raw high/low and the prior close.
+    assert!(q
+        .sql
+        .contains("GREATEST(e.high - e.low, ABS(e.high - LAG(e.close)"));
+    // Base scan pulls high/low from the canonical candle OHLC rows.
+    assert!(q.sql.contains("cd.data_type = 'candle'"));
+    assert!(q.sql.contains("->>'high'"));
+    assert!(q.sql.contains("o.high, o.low"));
+}
+
+#[test]
+fn tr_on_close_is_type_error() {
+    // TR() is HLC true range and requires a candle identity; a bare close series
+    // is no longer valid.
+    let err = compile(&req("TR([close.1d; $from:$to])")).unwrap_err();
+    assert!(
+        err.to_string().contains("candle identity"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn candle_series_outside_tr_is_rejected() {
+    // The candle identity is only meaningful as the argument to TR(...).
+    let err = compile(&req("AVG([candle.1d; $from:$to], 5)")).unwrap_err();
+    assert!(
+        err.to_string().contains("only valid as the argument to TR"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -327,7 +369,7 @@ fn trig_functions_reject_a_window() {
 #[test]
 fn worked_mapping_sep_atr() {
     let mut r = req(
-        "(AVG([close.1d; $from:$to], $fast) - AVG([close.1d; $from:$to], $slow)) / RMA(TR([close.1d; $from:$to]), $atr)",
+        "(AVG([close.1d; $from:$to], $fast) - AVG([close.1d; $from:$to], $slow)) / RMA(TR([candle.1d; $from:$to]), $atr)",
     );
     r.params.insert("fast".into(), ParamValue::Int(5));
     r.params.insert("slow".into(), ParamValue::Int(50));
@@ -676,7 +718,7 @@ fn consumer_sql_sma_14_31() {
 #[test]
 fn consumer_sql_atr_14_31() {
     let q = compile(&req(
-        "{ atr_14: RMA(TR([close.1h; $from:$to]), 14), atr_31: RMA(TR([close.1h; $from:$to]), 31) }",
+        "{ atr_14: RMA(TR([candle.1h; $from:$to]), 14), atr_31: RMA(TR([candle.1h; $from:$to]), 31) }",
     ))
     .unwrap();
     assert_eq!(q.indicators, vec!["atr_14".to_string(), "atr_31".to_string()]);
@@ -789,7 +831,7 @@ fn consumer_sql_vol_14_31() {
 fn consumer_sql_sep_atr() {
     let mut r = req(
         "{ sep_atr: (AVG([close.1h; $from:$to], $fast) - AVG([close.1h; $from:$to], $slow)) \
-           / RMA(TR([close.1h; $from:$to]), $atr) }",
+           / RMA(TR([candle.1h; $from:$to]), $atr) }",
     );
     r.params.insert("atr".into(), ParamValue::Int(14));
     r.params.insert("fast".into(), ParamValue::Int(48));
