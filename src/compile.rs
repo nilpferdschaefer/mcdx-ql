@@ -63,6 +63,9 @@ pub struct Scaffolds {
     pub closes_to_date: bool,
     pub highs_to_date: bool,
     pub lows_to_date: bool,
+    /// The base scan must expose raw `high`/`low` columns (sourced from the
+    /// `data_type='candle'` OHLC rows) for the HLC true-range / ATR paths.
+    pub ohlc: bool,
     pub market_tickers: Vec<String>,
 }
 
@@ -248,6 +251,7 @@ pub fn compile_batch(req: &CompileRequest, batch: &BatchExpr) -> Result<Compiled
         closes_to_date: analysis.needs_closes_to_date,
         highs_to_date: analysis.needs_highs_to_date,
         lows_to_date: analysis.needs_lows_to_date,
+        ohlc: analysis.needs_ohlc,
         market_tickers: analysis.market_tickers.iter().cloned().collect(),
     };
 
@@ -467,13 +471,26 @@ impl Codegen<'_> {
                 })
             }
             CallOp::Tr => {
-                // Close-to-close true range via to-date array (Wilder path).
+                // HLC true range: max(high-low, |high-prevClose|, |low-prevClose|),
+                // matching the Rust engine `tr_series` and Java `IndicatorMath`.
+                // TR requires a candle identity (enforced in `sem.rs`); high/low
+                // come from the `data_type='candle'` OHLC scan (needs_ohlc).
+                if !is_row_candle(&args[0]) {
+                    return Err(Error::compile(
+                        "TR() requires a candle identity, e.g. TR([candle.1d])",
+                        self.expr_src,
+                    ));
+                }
+                let lag_close = "LAG(e.close) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start)";
                 Ok(Frag {
-                    value_sql: "ABS(e.close - LAG(e.close) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start))".into(),
+                    value_sql: format!(
+                        "GREATEST(e.high - e.low, ABS(e.high - {lag}), ABS(e.low - {lag}))",
+                        lag = lag_close
+                    ),
                     version_sql: "e.version".into(),
-                    warmup_sql: "(LAG(e.close) OVER (PARTITION BY e.coin, e.seg_key ORDER BY e.timestamp_start) IS NOT NULL)".into(),
+                    warmup_sql: format!("({lag_close} IS NOT NULL)"),
                     period: None,
-                    series_key: Some("close".into()),
+                    series_key: Some("candle".into()),
                 })
             }
             CallOp::Avg | CallOp::Count | CallOp::Var | CallOp::Std => {
@@ -532,11 +549,12 @@ impl Codegen<'_> {
             }
             CallOp::Rma => {
                 let period = self.resolve_period(window, pos)?;
-                // RMA(TR(close)) → Wilder ATR over closes_to_date (analytics atrWilderSql).
-                if !is_tr_of_close(&args[0]) {
+                // RMA(TR(candle)) → Wilder ATR over the HLC true range (analytics
+                // atrWilderSql), computed from the highs/lows/closes to-date arrays.
+                if !is_tr_of_candle(&args[0]) {
                     let _ = self.gen_expr(&args[0])?;
                     return Err(Error::compile(
-                        "RMA currently supports RMA(TR([close; …]), $period) only",
+                        "RMA currently supports RMA(TR([candle; …]), $period) only",
                         self.expr_src,
                     ));
                 }
@@ -544,7 +562,12 @@ impl Codegen<'_> {
                 // Value uses inception closes_to_date; version matches SMA's finite period frame.
                 let win = self.ensure_trailing_window("close", period);
                 Ok(Frag {
-                    value_sql: rma_tr_sql("e.closes_to_date", period),
+                    value_sql: rma_tr_sql(
+                        "e.highs_to_date",
+                        "e.lows_to_date",
+                        "e.closes_to_date",
+                        period,
+                    ),
                     version_sql: format!("MAX(e.version) OVER {win}"),
                     warmup_sql: format!("(array_length(e.closes_to_date, 1) >= {})", period + 1),
                     period: Some(period),
@@ -751,13 +774,24 @@ fn market_close_ticker(expr: &Expr, params: &BTreeMap<String, ParamValue>) -> Op
     }
 }
 
-fn is_tr_of_close(expr: &Expr) -> bool {
+fn is_row_candle(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Series(Series {
+            name,
+            asset: AssetRef::Row | AssetRef::SelfRow,
+            ..
+        }) if name == "candle"
+    )
+}
+
+fn is_tr_of_candle(expr: &Expr) -> bool {
     match expr {
         Expr::Call {
             op: CallOp::Tr,
             args,
             ..
-        } => args.len() == 1 && is_row_close(&args[0]),
+        } => args.len() == 1 && is_row_candle(&args[0]),
         _ => false,
     }
 }
@@ -818,17 +852,25 @@ fn ema_sql(closes_arr: &str, period: i32) -> String {
     )
 }
 
-/// Wilder ATR: close-to-close TR over `C`, seed AVG(tr) for bars `2..period+1`.
-fn rma_tr_sql(closes_arr: &str, period: i32) -> String {
+/// Wilder ATR over the HLC true range `max(h-l, |h-prevC|, |l-prevC|)`, seed
+/// AVG(TR) for bars `2..period+1`. Matches the Rust engine `wilder_atr` and the
+/// Flink Java `IndicatorMath.atr` (canonical TR definition).
+///
+/// The three `_to_date` arrays are aligned (same partition/order/frame), so
+/// ordinality lines up across highs/lows/closes.
+fn rma_tr_sql(highs_arr: &str, lows_arr: &str, closes_arr: &str, period: i32) -> String {
     let seed_ord = period + 1;
     format!(
-        "(SELECT CASE WHEN array_length({arr}, 1) < {need} THEN NULL ELSE (\n\
+        "(SELECT CASE WHEN array_length({closes}, 1) < {need} THEN NULL ELSE (\n\
            WITH RECURSIVE vals AS (\n\
-             SELECT u.ord, u.c::double precision AS c\n\
-             FROM unnest({arr}) WITH ORDINALITY AS u(c, ord)\n\
+             SELECT h.ord, h.v::double precision AS high, l.v::double precision AS low,\n\
+                    c.v::double precision AS close\n\
+             FROM unnest({highs}) WITH ORDINALITY AS h(v, ord)\n\
+             JOIN unnest({lows}) WITH ORDINALITY AS l(v, ord) ON l.ord = h.ord\n\
+             JOIN unnest({closes}) WITH ORDINALITY AS c(v, ord) ON c.ord = h.ord\n\
            ),\n\
            tr AS (\n\
-             SELECT v.ord, ABS(v.c - p.c) AS tr\n\
+             SELECT v.ord, GREATEST(v.high - v.low, ABS(v.high - p.close), ABS(v.low - p.close)) AS tr\n\
              FROM vals v JOIN vals p ON p.ord = v.ord - 1\n\
              WHERE v.ord >= 2\n\
            ),\n\
@@ -844,7 +886,9 @@ fn rma_tr_sql(closes_arr: &str, period: i32) -> String {
            )\n\
            SELECT r.atr FROM rec r ORDER BY r.ord DESC LIMIT 1\n\
          ) END)",
-        arr = closes_arr,
+        highs = highs_arr,
+        lows = lows_arr,
+        closes = closes_arr,
         period = period,
         need = period + 1,
         seed_ord = seed_ord
@@ -880,7 +924,7 @@ fn rsi_sql(closes_arr: &str, period: i32) -> String {
              FROM rec r JOIN ch c ON c.ord = r.ord + 1\n\
            )\n\
            SELECT CASE\n\
-                    WHEN r.avg_loss = 0 THEN 100.0\n\
+                    WHEN r.avg_loss = 0 THEN CASE WHEN r.avg_gain > 0 THEN 100.0 ELSE 50.0 END\n\
                     ELSE 100.0 - (100.0 / (1.0 + (r.avg_gain / r.avg_loss)))\n\
                   END\n\
            FROM rec r ORDER BY r.ord DESC LIMIT 1\n\
@@ -1023,7 +1067,29 @@ fn render_envelope(
     )
     .unwrap();
 
-    // ordered — scan pads lookback before emit_from
+    // ordered — scan pads lookback before emit_from. When the query needs raw
+    // OHLC (HLC true range / ATR), LEFT JOIN the canonical `data_type='candle'`
+    // rows and extract high/low from the flat OHLCV JSON value (legacy
+    // `candles[]`-wrapped rows remain readable), aligned by (asset, ts).
+    let (ohlc_cols, ohlc_join) = if scaffolds.ohlc {
+        (
+            ",\n\
+             \x20        (COALESCE(cd.value->>'high', cd.value->'candles'->0->>'high'))::double precision AS high,\n\
+             \x20        (COALESCE(cd.value->>'low', cd.value->'candles'->0->>'low'))::double precision AS low"
+                .to_string(),
+            format!(
+                "\x20 LEFT JOIN data cd ON cd.asset = c.asset\n\
+                 \x20   AND cd.timestamp_start = c.timestamp_start\n\
+                 \x20   AND cd.data_type = 'candle'\n\
+                 \x20   AND cd.reporting_period = '{reporting_period}'\n\
+                 \x20   AND cd.params_hash = '{empty_hash}'\n",
+                reporting_period = reporting_period,
+                empty_hash = crate::EMPTY_PARAMS_HASH,
+            ),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     writeln!(
         sql,
         "ordered AS (\n\
@@ -1035,9 +1101,10 @@ fn render_envelope(
          \x20        c.timestamp_start\n\
          \x20          - ((ROW_NUMBER() OVER (\n\
          \x20                 PARTITION BY c.asset ORDER BY c.timestamp_start) - 1)\n\
-         \x20             * {interval_ms}) AS seg_key\n\
+         \x20             * {interval_ms}) AS seg_key{ohlc_cols}\n\
          \x20 FROM data c\n\
          \x20 JOIN mcdx_asset a ON a.id = c.asset\n\
+         {ohlc_join}\
          \x20 CROSS JOIN params p\n\
          \x20 CROSS JOIN bounds b\n\
          \x20 WHERE c.data_type = 'close'\n\
@@ -1052,6 +1119,9 @@ fn render_envelope(
 
     // enriched
     write!(sql, "enriched AS (\n  SELECT o.coin, o.timestamp_start, o.timestamp_end, o.close, o.version, o.seg_key").unwrap();
+    if scaffolds.ohlc {
+        write!(sql, ",\n         o.high, o.low").unwrap();
+    }
     if scaffolds.bar_ret {
         write!(
             sql,
