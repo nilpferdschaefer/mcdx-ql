@@ -2,21 +2,21 @@
 //!
 //! Provenance of the cases below:
 //!   * `ram_*`   — ported from `mcdx-ram/src/ql/eval.rs` `#[cfg(test)]` (the
-//!                 origin of this math). No coverage loss on extraction.
+//!     origin of this math). No coverage loss on extraction.
 //!   * `java_*`  — golden numbers replicated from the Flink Java tests under
-//!                 `mcdx-analytics/flink/src/test/java/com/mcdx/...`
-//!                 (`IndicatorMathTest`, `EmaCloseSqlParityTest`,
-//!                 `AtrWilderSqlParityTest`, `RsiWilderSqlParityTest`,
-//!                 `JointAnalyticsCalculatorTest`).
+//!     `mcdx-analytics/flink/src/test/java/com/mcdx/...`
+//!     (`IndicatorMathTest`, `EmaCloseSqlParityTest`,
+//!     `AtrWilderSqlParityTest`, `RsiWilderSqlParityTest`,
+//!     `JointAnalyticsCalculatorTest`).
 //!   * `sql_*`   — the mcdx-ql SQL emitter (`compile.rs` `ema_sql`/`rma_tr_sql`/
-//!                 `rsi_sql`) carries no numeric fixtures (its tests are
-//!                 SQL-shape only); its documented algorithm is re-expressed
-//!                 here as executable golden vectors so the Rust engine is
-//!                 provably at parity with the SQL seeding.
+//!     `rsi_sql`) carries no numeric fixtures (its tests are
+//!     SQL-shape only); its documented algorithm is re-expressed
+//!     here as executable golden vectors so the Rust engine is
+//!     provably at parity with the SQL seeding.
 //!   * `converge_*` — the two former parity gaps (HLC true range; RSI flat
-//!                 window). The user chose the **Java definition as canonical**,
-//!                 so the engine + SQL now MATCH Java. These assert convergence
-//!                 (engine == SQL == Java), replacing the old divergence tests.
+//!     window). The user chose the **Java definition as canonical**,
+//!     so the engine + SQL now MATCH Java. These assert convergence
+//!     (engine == SQL == Java), replacing the old divergence tests.
 
 use super::*;
 
