@@ -425,18 +425,15 @@ impl<'a> AnalyzeCtx<'a> {
                 // Base scan must source raw high/low from the candle OHLC rows.
                 self.needs_ohlc = true;
             }
-            "high" | "low" => {
-                // Scaffold hooks exist for ADX; full multi-type ordered scan is not yet emitted.
-                return Err(Error::sem(
-                    format!(
-                        "series [{}] is reserved for ADX scaffolds and is not yet compilable",
-                        s.name
-                    ),
-                    self.expr_src,
-                    Some(s.pos),
-                ));
+            "high" | "low" | "open" => {
+                // Raw OHLC candle columns. Enabled for the in-memory (RAM)
+                // backend, which sources these straight off the candle ring
+                // (mcdx-ram eval reads c.open/c.high/c.low). The SQL backend does
+                // not yet emit high/low ordered scans, so these remain unsupported
+                // on that path — the ADX scaffold work.
+                self.needs_ohlc = true;
             }
-            "open" | "volume" => {
+            "volume" => {
                 return Err(Error::sem(
                     format!("series [{}] is not yet supported", s.name),
                     self.expr_src,
